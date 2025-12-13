@@ -134,6 +134,7 @@ bool GetLocalIPs(string &ipv4, string &ipv6)
 {
     ipv4.clear();
     ipv6.clear();
+    string fallback_ipv4;
 
     struct ifaddrs *ifaddr, *ifa;
     if (getifaddrs(&ifaddr) == -1)
@@ -168,8 +169,25 @@ bool GetLocalIPs(string &ipv4, string &ipv6)
 
             if (family == AF_INET)
             {
-                if (ipv4.empty())
-                    ipv4 = host;
+                string s_ip = host;
+                // 排除 127.x.x.x 和 198.18.x.x (常见 VPN 保留地址)
+                if (s_ip.find("127.") == 0 || s_ip.find("198.18.") == 0)
+                    continue;
+
+                // 简单的启发式优先级: e*(ethernet), w*(wireless) 优先
+                string ifname = ifa->ifa_name;
+                bool is_physical = (ifname.find("eth") == 0 || ifname.find("en") == 0 || ifname.find("wlan") == 0 || ifname.find("wl") == 0);
+
+                if (is_physical)
+                {
+                    if (ipv4.empty())
+                        ipv4 = s_ip;
+                }
+                else
+                {
+                    if (fallback_ipv4.empty())
+                        fallback_ipv4 = s_ip;
+                }
             }
             else if (family == AF_INET6)
             {
@@ -188,12 +206,19 @@ bool GetLocalIPs(string &ipv4, string &ipv6)
             }
         }
     }
+
+    if (ipv4.empty() && !fallback_ipv4.empty())
+    {
+        ipv4 = fallback_ipv4;
+    }
+
     return !ipv4.empty();
 }
 
-// libcurl 写回调（丢弃输出，避免打印到控制台）
+// libcurl 写回调 (保存响应内容)
 size_t WriteCallback(void *contents, size_t size, size_t nmemb, void *userp)
 {
+    ((string *)userp)->append((char *)contents, size * nmemb);
     return size * nmemb;
 }
 
@@ -227,6 +252,9 @@ void PerformLogin(CURL *curl)
     // 设置请求选项
     curl_easy_setopt(curl, CURLOPT_URL, fullUrl.c_str());
 
+    string response;
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+
     // 执行请求
     CURLcode res = curl_easy_perform(curl);
 
@@ -240,7 +268,28 @@ void PerformLogin(CURL *curl)
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
         if (response_code == 200)
         {
-            cout << "[状态] 网络连接正常 (IPv4: " << ipv4 << ")" << endl;
+            // 解析简单的 JSON 响应
+            // 成功: "result":1
+            // 已在线: "ret_code":2
+            bool isSuccess = (response.find("\"result\":1") != string::npos);
+            bool isOnline = (response.find("\"ret_code\":2") != string::npos);
+
+            if (isSuccess || isOnline)
+            {
+                cout << "[成功] " << (isOnline ? "设备已在线" : "登录成功") << " (IPv4: " << ipv4 << ")" << endl;
+            }
+            else
+            {
+                cout << "[失败] 登录失败 (IPv4: " << ipv4 << ")" << endl;
+            }
+
+            if (!response.empty())
+            {
+                // 简单的截断输出，防止过长
+                if (response.length() > 200)
+                    response = response.substr(0, 200) + "...";
+                cout << "[响应] " << response << endl;
+            }
         }
         else
         {
@@ -289,9 +338,9 @@ int main()
     curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, WriteCallback);
     // 启用 TCP Keep-Alive
     curl_easy_setopt(curl.get(), CURLOPT_TCP_KEEPALIVE, 1L);
-    // 不验证 SSL 证书 (校园网自签名证书可能导致问题，视情况开启)
-    // curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYPEER, 0L);
-    // curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYHOST, 0L);
+    // 不验证 SSL 证书 (校园网自签名证书可能导致问题)
+    curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYHOST, 0L);
 
     cout << "=== CQU 自动登录服务 (Linux) 已启动 ===" << endl;
     cout << "按 Ctrl+C 可安全退出。" << endl;

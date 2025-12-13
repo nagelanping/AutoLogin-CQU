@@ -149,6 +149,8 @@ bool GetLocalIPs(string &ipv4, string &ipv6)
 {
     ipv4.clear();
     ipv6.clear();
+    string fallback_ipv4;
+
     ULONG outBufLen = 15000;
     ScopedMalloc pAddresses(malloc(outBufLen));
 
@@ -172,8 +174,22 @@ bool GetLocalIPs(string &ipv4, string &ipv6)
 
                 if (pUni->Address.lpSockaddr->sa_family == AF_INET)
                 {
-                    if (ipv4.empty())
-                        ipv4 = ip;
+                    string s_ip = ip;
+                    // 排除 127.x.x.x 和 198.18.x.x (常见 VPN 保留地址)
+                    if (s_ip.find("127.") == 0 || s_ip.find("198.18.") == 0)
+                        continue;
+
+                    // 优先选择物理网卡 (以太网 或 Wi-Fi)
+                    if (pCurr->IfType == IF_TYPE_ETHERNET_CSMACD || pCurr->IfType == IF_TYPE_IEEE80211)
+                    {
+                        if (ipv4.empty())
+                            ipv4 = s_ip;
+                    }
+                    else
+                    {
+                        if (fallback_ipv4.empty())
+                            fallback_ipv4 = s_ip;
+                    }
                 }
                 else if (pUni->Address.lpSockaddr->sa_family == AF_INET6)
                 {
@@ -184,6 +200,13 @@ bool GetLocalIPs(string &ipv4, string &ipv6)
             }
         }
     }
+
+    // 如果没有找到物理网卡 IP，使用备选 IP
+    if (ipv4.empty() && !fallback_ipv4.empty())
+    {
+        ipv4 = fallback_ipv4;
+    }
+
     return !ipv4.empty();
 }
 
@@ -225,6 +248,12 @@ void PerformLogin(HINTERNET hConnect)
         return;
     }
 
+    // 忽略 SSL 证书错误 (常见于校园网自签名证书)
+    DWORD dwFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
+                    SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
+                    SECURITY_FLAG_IGNORE_CERT_DATE_INVALID;
+    WinHttpSetOption(hRequest.get(), WINHTTP_OPTION_SECURITY_FLAGS, &dwFlags, sizeof(dwFlags));
+
     // 发送请求
     if (WinHttpSendRequest(hRequest.get(), WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0))
     {
@@ -237,7 +266,47 @@ void PerformLogin(HINTERNET hConnect)
 
             if (statusCode == 200)
             {
-                cout << "[状态] 网络连接正常 (IPv4: " << ipv4 << ")" << endl;
+                // 读取响应内容以确认登录结果
+                string response;
+                DWORD dwSize = 0;
+                DWORD dwDownloaded = 0;
+                do
+                {
+                    dwSize = 0;
+                    if (!WinHttpQueryDataAvailable(hRequest.get(), &dwSize))
+                        break;
+                    if (dwSize == 0)
+                        break;
+
+                    vector<char> buffer(dwSize + 1);
+                    if (WinHttpReadData(hRequest.get(), &buffer[0], dwSize, &dwDownloaded))
+                    {
+                        response.append(buffer.data(), dwDownloaded);
+                    }
+                } while (dwSize > 0);
+
+                // 解析简单的 JSON 响应
+                // 成功: "result":1
+                // 已在线: "ret_code":2
+                bool isSuccess = (response.find("\"result\":1") != string::npos);
+                bool isOnline = (response.find("\"ret_code\":2") != string::npos);
+
+                if (isSuccess || isOnline)
+                {
+                    cout << "[成功] " << (isOnline ? "设备已在线" : "登录成功") << " (IPv4: " << ipv4 << ")" << endl;
+                }
+                else
+                {
+                    cout << "[失败] 登录失败 (IPv4: " << ipv4 << ")" << endl;
+                }
+
+                if (!response.empty())
+                {
+                    // 简单的截断输出，防止过长
+                    if (response.length() > 200)
+                        response = response.substr(0, 200) + "...";
+                    cout << "[响应] " << response << endl;
+                }
             }
             else
             {

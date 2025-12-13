@@ -51,7 +51,12 @@ def get_local_ip():
 
     try:
         ip_list = socket.gethostbyname_ex(hostname)[-1]
-        ipv4 = ip_list[0] if ip_list else ""
+        # 过滤掉回环地址和常见VPN地址 (198.18.x.x)
+        valid_ips = [ip for ip in ip_list if not ip.startswith("127.") and not ip.startswith("198.18.")]
+        if valid_ips:
+            ipv4 = valid_ips[0]
+        elif ip_list:
+            ipv4 = ip_list[0]  # 回退
     except socket.gaierror as e:
         print(f"获取IPv4地址失败: {e}")
 
@@ -91,31 +96,49 @@ def build_login_url(user_ip, user_ipv6=""):
 
 def main():
     """主函数，循环检测网络连接并尝试自动登录"""
-    ipv4, ipv6 = get_local_ip()
-
-    if not ipv4:
-        print("错误：无法获取到本机IPv4地址，程序退出。")
-        return
-
-    if not ipv6:
-        print("警告：未能获取到有效的IPv6地址，将仅使用IPv4尝试登录。")
-
-    login_url = build_login_url(ipv4, ipv6)
-    print(f"将使用 IPv4: {ipv4} 和 IPv6: {ipv6 or 'N/A'} 尝试登录...")
+    # 忽略 SSL 警告
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     session = requests.Session()
     session.trust_env = False
 
-    while True:
-        try:
-            resp = session.get(login_url, timeout=TIMEOUT)
-            status = (
-                "网络连接正常或已成功登录。" if resp.ok else "网络连接异常，正在重试..."
-            )
-        except requests.RequestException as e:
-            status = f"请求错误: {e}"
+    print("=== CQU 自动登录服务已启动 ===")
+    print("按 Ctrl+C 可安全退出。")
 
-        print(status)
+    while True:
+        ipv4, ipv6 = get_local_ip()
+
+        if not ipv4:
+            print("[错误] 无法获取本机 IPv4 地址。")
+        else:
+            login_url = build_login_url(ipv4, ipv6)
+            
+            try:
+                # verify=False 忽略 SSL 证书错误
+                resp = session.get(login_url, timeout=TIMEOUT, verify=False)
+                
+                if resp.status_code == 200:
+                    content = resp.text
+                    # 解析响应
+                    is_success = '"result":1' in content
+                    is_online = '"ret_code":2' in content
+                    
+                    if is_success or is_online:
+                        msg = "设备已在线" if is_online else "登录成功"
+                        print(f"[成功] {msg} (IPv4: {ipv4})")
+                    else:
+                        print(f"[失败] 登录失败 (IPv4: {ipv4})")
+                    
+                    if content:
+                        display_content = content[:200] + "..." if len(content) > 200 else content
+                        print(f"[响应] {display_content}")
+                else:
+                    print(f"[警告] 请求返回状态码: {resp.status_code}")
+
+            except requests.RequestException as e:
+                print(f"[错误] 请求错误: {e}")
+
         time.sleep(CHECK_INTERVAL)
 
 
