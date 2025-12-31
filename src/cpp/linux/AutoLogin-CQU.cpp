@@ -20,9 +20,12 @@
 using namespace std;
 
 // ================= 配置变量 =================
-const string LOGIN_BASE_URL = "https://login.cqu.edu.cn:802/eportal/portal/login";
+const string LOGIN_HOST = "login.cqu.edu.cn";
+const int LOGIN_PORT = 802;
+const string LOGIN_PATH = "/eportal/portal/login";
 string USER_ACCOUNT = "";
 string USER_PASSWORD = "";
+string SERVER_IP = "";  // 可选：直接指定服务器 IP，绕过 DNS 解析
 int CHECK_INTERVAL_SEC = 20;
 long TIMEOUT_SEC = 5;
 
@@ -94,10 +97,12 @@ bool LoadConfig(const string &filename)
             string key = Trim(line.substr(0, delimiterPos));
             string value = Trim(line.substr(delimiterPos + 1));
 
-            if (key == "USER_ACCOUNT")
-                USER_ACCOUNT = value;
+            if (key == "STUDENT_ID")
+                USER_ACCOUNT = ",0," + value;
             else if (key == "USER_PASSWORD")
                 USER_PASSWORD = value;
+            else if (key == "SERVER_IP")
+                SERVER_IP = value;
             else if (key == "CHECK_INTERVAL")
                 CHECK_INTERVAL_SEC = stoi(value);
             else if (key == "TIMEOUT")
@@ -108,6 +113,52 @@ bool LoadConfig(const string &filename)
 }
 
 // ================= 工具函数 =================
+
+// 解析主机名到 IP（优先 IPv4，回退 IPv6）
+bool ResolveHostToIP(const string &host, string &out_ip)
+{
+    out_ip.clear();
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    struct addrinfo *result = NULL;
+    int res = getaddrinfo(host.c_str(), NULL, &hints, &result);
+    if (res != 0 || result == NULL)
+        return false;
+
+    // 优先 IPv4
+    for (struct addrinfo *p = result; p != NULL; p = p->ai_next)
+    {
+        if (p->ai_family == AF_INET)
+        {
+            char ip[INET_ADDRSTRLEN] = {0};
+            struct sockaddr_in *sa = (struct sockaddr_in *)p->ai_addr;
+            inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
+            out_ip = ip;
+            freeaddrinfo(result);
+            return true;
+        }
+    }
+
+    // 再尝试 IPv6
+    for (struct addrinfo *p = result; p != NULL; p = p->ai_next)
+    {
+        if (p->ai_family == AF_INET6)
+        {
+            char ip[INET6_ADDRSTRLEN] = {0};
+            struct sockaddr_in6 *sa6 = (struct sockaddr_in6 *)p->ai_addr;
+            inet_ntop(AF_INET6, &sa6->sin6_addr, ip, sizeof(ip));
+            out_ip = ip;
+            freeaddrinfo(result);
+            return true;
+        }
+    }
+
+    freeaddrinfo(result);
+    return false;
+}
 
 // URL 编码
 string UrlEncode(const string &value)
@@ -229,13 +280,25 @@ void PerformLogin(CURL *curl)
     string ipv4, ipv6;
     if (!GetLocalIPs(ipv4, ipv6))
     {
-        cerr << "[错误] 无法获取本机 IPv4 地址。" << endl;
+        cerr << "autologin-cqu: error: failed to get local IPv4 address" << endl;
         return;
     }
 
-    // 构建 URL 参数
+    // 确定目标服务器 IP：优先使用配置文件中的 SERVER_IP，否则尝试 DNS 解析
+    string resolvedIP;
+    if (!SERVER_IP.empty())
+    {
+        resolvedIP = SERVER_IP;
+    }
+    else if (!ResolveHostToIP(LOGIN_HOST, resolvedIP))
+    {
+        cerr << "autologin-cqu: error: failed to resolve host " << LOGIN_HOST << endl;
+        return;
+    }
+
+    // 构建 URL 参数（使用解析的 IP 地址）
     stringstream ss;
-    ss << LOGIN_BASE_URL << "?"
+    ss << "https://" << resolvedIP << ":" << LOGIN_PORT << LOGIN_PATH << "?"
        << "callback=dr1004"
        << "&login_method=1"
        << "&user_account=" << UrlEncode(USER_ACCOUNT)
@@ -251,19 +314,33 @@ void PerformLogin(CURL *curl)
 
     // 设置请求选项
     curl_easy_setopt(curl, CURLOPT_URL, fullUrl.c_str());
+    
+    // 添加 Host 头以便服务器识别虚拟主机（使用原始主机名）
+    struct curl_slist *headers = NULL;
+    string hostHeader = "Host: " + LOGIN_HOST;
+    headers = curl_slist_append(headers, hostHeader.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
     string response;
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
 
     // 执行请求
     CURLcode res = curl_easy_perform(curl);
+    
+    // 清理 headers
+    curl_slist_free_all(headers);
 
     if (res != CURLE_OK)
     {
-        cerr << "[错误] 请求失败: " << curl_easy_strerror(res) << endl;
+        cerr << "autologin-cqu: error: request failed: " << curl_easy_strerror(res) << endl;
+        // 请求失败时重置连接，避免使用失效的连接池
+        curl_easy_setopt(curl, CURLOPT_FRESH_CONNECT, 1L);
     }
     else
     {
+        // 请求成功后恢复连接复用
+        curl_easy_setopt(curl, CURLOPT_FRESH_CONNECT, 0L);
+        
         long response_code;
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
         if (response_code == 200)
@@ -276,24 +353,21 @@ void PerformLogin(CURL *curl)
 
             if (isSuccess || isOnline)
             {
-                cout << "[成功] " << (isOnline ? "设备已在线" : "登录成功") << " (IPv4: " << ipv4 << ")" << endl;
+                cout << "autologin-cqu: " << (isOnline ? "already online" : "login success") << " ip=" << ipv4 << endl;
             }
             else
             {
-                cout << "[失败] 登录失败 (IPv4: " << ipv4 << ")" << endl;
-            }
-
-            if (!response.empty())
-            {
-                // 简单的截断输出，防止过长
-                if (response.length() > 200)
-                    response = response.substr(0, 200) + "...";
-                cout << "[响应] " << response << endl;
+                // 登录失败时也重置连接
+                curl_easy_setopt(curl, CURLOPT_FRESH_CONNECT, 1L);
+                // 输出详细的失败原因
+                cerr << "autologin-cqu: login failed ip=" << ipv4 << " response=" << response << endl;
             }
         }
         else
         {
-            cout << "[警告] 请求返回状态码: " << response_code << endl;
+            // HTTP 状态码异常时重置连接
+            curl_easy_setopt(curl, CURLOPT_FRESH_CONNECT, 1L);
+            cerr << "autologin-cqu: warning: http status " << response_code << endl;
         }
     }
 }
@@ -303,12 +377,12 @@ int main()
     // 0. 加载配置
     if (!LoadConfig("config.ini"))
     {
-        cerr << "[警告] 未找到配置文件 config.ini，请确保文件存在。" << endl;
+        cerr << "autologin-cqu: warning: config.ini not found" << endl;
     }
 
     if (USER_ACCOUNT.empty() || USER_PASSWORD.empty())
     {
-        cerr << "[错误] 账号或密码未配置，请检查 config.ini。" << endl;
+        cerr << "autologin-cqu: error: account or password not configured" << endl;
         return 1;
     }
 
@@ -325,7 +399,7 @@ int main()
 
     if (!curl)
     {
-        cerr << "Curl 初始化失败。" << endl;
+        cerr << "autologin-cqu: error: curl init failed" << endl;
         return 1;
     }
 
@@ -342,8 +416,7 @@ int main()
     curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYHOST, 0L);
 
-    cout << "=== CQU 自动登录服务 (Linux) 已启动 ===" << endl;
-    cout << "按 Ctrl+C 可安全退出。" << endl;
+    cout << "autologin-cqu: started interval=" << CHECK_INTERVAL_SEC << "s" << endl;
 
     // 4. 主循环
     while (g_running)
@@ -358,7 +431,7 @@ int main()
         }
     }
 
-    cout << "\n正在退出..." << endl;
+    cout << "autologin-cqu: stopped" << endl;
     // ScopedCurl 和 CurlGlobal 会自动清理资源
     return 0;
 }

@@ -1,0 +1,39 @@
+[Unit]
+Description=CQU Campus Network Auto-Login Service
+; 在网络启动后启动此服务，确保网络可用
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+; 运行用户
+User=<USERNAME>
+
+; 程序工作目录（使用绝对路径，必须与 config.ini 所在目录相同）
+WorkingDirectory=<PROGRAM_DIR>
+
+; 启动命令（指向编译后的可执行文件）
+ExecStart=<PROGRAM_DIR>/AutoLogin-CQU
+
+; 服务异常退出时自动重启
+Restart=always
+
+; 重启间隔（秒）
+RestartSec=5
+
+; 日志输出到 systemd journal
+StandardOutput=journal
+StandardError=journal
+
+; 日志标识符（在 journalctl 中更容易识别）
+SyslogIdentifier=AutoLogin-CQU
+
+; 可选：如需指定特定日志级别，可添加以下参数
+; StandardOutput=journal
+; SyslogFacility=local0
+; SyslogLevel=info
+
+[Install]
+; 多用户目标模式下启动此服务
+WantedBy=multi-user.target

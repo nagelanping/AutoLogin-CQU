@@ -3,6 +3,7 @@
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
 #include <windows.h>
+#include <shellapi.h>
 #include <winhttp.h>
 #include <iostream>
 #include <string>
@@ -11,7 +12,7 @@
 #include <iomanip>
 #include <memory>
 
-// 编译指令: g++ AutoLogin-CQU.cpp -o AutoLogin-CQU.exe -lwinhttp -liphlpapi -lws2_32 -static
+// 编译指令: g++ AutoLogin-CQU.cpp -o AutoLogin-CQU.exe -lwinhttp -liphlpapi -lws2_32 -lshell32 -luser32 -static
 
 using namespace std;
 
@@ -23,6 +24,7 @@ const wstring LOGIN_PATH_BASE = L"/eportal/portal/login";
 // ================= 全局配置变量 =================
 string USER_ACCOUNT;
 string USER_PASSWORD;
+string SERVER_IP;  // 可选：直接指定服务器 IP，绕过 DNS 解析
 DWORD CHECK_INTERVAL_MS = 20000;
 DWORD TIMEOUT_MS = 5000;
 
@@ -39,11 +41,17 @@ void LoadConfig()
 
     char buffer[256];
 
-    GetPrivateProfileStringA("Settings", "USER_ACCOUNT", "", buffer, 256, iniPath.c_str());
-    USER_ACCOUNT = buffer;
+    GetPrivateProfileStringA("Settings", "STUDENT_ID", "", buffer, 256, iniPath.c_str());
+    if (strlen(buffer) > 0)
+        USER_ACCOUNT = string(",0,") + buffer;
+    else
+        USER_ACCOUNT = "";
 
     GetPrivateProfileStringA("Settings", "USER_PASSWORD", "", buffer, 256, iniPath.c_str());
     USER_PASSWORD = buffer;
+
+    GetPrivateProfileStringA("Settings", "SERVER_IP", "", buffer, 256, iniPath.c_str());
+    SERVER_IP = buffer;
 
     int interval = GetPrivateProfileIntA("Settings", "CHECK_INTERVAL", 20, iniPath.c_str());
     if (interval > 0)
@@ -66,6 +74,18 @@ void LoadConfig()
 
 // ================= 全局控制 =================
 HANDLE g_hExitEvent = NULL;
+HANDLE g_hPauseEvent = NULL;  // 暂停事件
+bool g_bPaused = false;       // 暂停状态
+bool g_bMinimized = false;    // 最小化状态
+
+// 系统托盘相关
+#define WM_TRAYICON (WM_USER + 1)
+#define ID_TRAY_SHOW 1001
+#define ID_TRAY_PAUSE 1002
+#define ID_TRAY_EXIT 1003
+NOTIFYICONDATAW g_nid = {0};
+HWND g_hWnd = NULL;           // 消息窗口句柄
+HWND g_hConsole = NULL;       // 控制台窗口句柄
 
 // 控制台信号处理 (Ctrl+C, 关闭窗口等)
 BOOL WINAPI ConsoleHandler(DWORD signal)
@@ -85,6 +105,220 @@ BOOL WINAPI ConsoleHandler(DWORD signal)
     default:
         return FALSE;
     }
+}
+
+// ================= 系统托盘功能 =================
+
+// 显示控制台窗口
+void ShowConsoleWindow()
+{
+    if (g_hConsole)
+    {
+        ShowWindow(g_hConsole, SW_RESTORE);
+        SetForegroundWindow(g_hConsole);
+        g_bMinimized = false;
+    }
+}
+
+// 隐藏控制台窗口到托盘
+void HideToTray()
+{
+    if (g_hConsole)
+    {
+        ShowWindow(g_hConsole, SW_HIDE);
+        g_bMinimized = true;
+    }
+}
+
+// 切换暂停状态
+void TogglePause()
+{
+    g_bPaused = !g_bPaused;
+    if (g_bPaused)
+    {
+        cout << "[信息] 服务已暂停，按 Ctrl+P 继续" << endl;
+    }
+    else
+    {
+        cout << "[信息] 服务已继续" << endl;
+        SetEvent(g_hPauseEvent);  // 唤醒主循环
+    }
+    
+    // 更新托盘提示
+    if (g_bPaused)
+        wcscpy_s(g_nid.szTip, L"CQU 自动登录 - 已暂停");
+    else
+        wcscpy_s(g_nid.szTip, L"CQU 自动登录 - 运行中");
+    Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+}
+
+// 创建托盘图标
+void CreateTrayIcon(HWND hWnd)
+{
+    g_nid.cbSize = sizeof(NOTIFYICONDATAW);
+    g_nid.hWnd = hWnd;
+    g_nid.uID = 1;
+    g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_nid.uCallbackMessage = WM_TRAYICON;
+    g_nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+    wcscpy_s(g_nid.szTip, L"CQU 自动登录 - 运行中");
+    Shell_NotifyIconW(NIM_ADD, &g_nid);
+}
+
+// 删除托盘图标
+void RemoveTrayIcon()
+{
+    Shell_NotifyIconW(NIM_DELETE, &g_nid);
+}
+
+// 显示托盘右键菜单
+void ShowTrayMenu(HWND hWnd)
+{
+    POINT pt;
+    GetCursorPos(&pt);
+    
+    HMENU hMenu = CreatePopupMenu();
+    AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHOW, L"显示");
+    AppendMenuW(hMenu, MF_STRING, ID_TRAY_PAUSE, g_bPaused ? L"继续" : L"暂停");
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"退出");
+    
+    SetForegroundWindow(hWnd);
+    TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, NULL);
+    DestroyMenu(hMenu);
+}
+
+// 隐藏窗口的消息处理函数
+LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    switch (msg)
+    {
+    case WM_TRAYICON:
+        if (lParam == WM_LBUTTONUP)
+        {
+            ShowConsoleWindow();
+        }
+        else if (lParam == WM_RBUTTONUP)
+        {
+            ShowTrayMenu(hWnd);
+        }
+        break;
+    case WM_COMMAND:
+        switch (LOWORD(wParam))
+        {
+        case ID_TRAY_SHOW:
+            ShowConsoleWindow();
+            break;
+        case ID_TRAY_PAUSE:
+            TogglePause();
+            break;
+        case ID_TRAY_EXIT:
+            SetEvent(g_hExitEvent);
+            break;
+        }
+        break;
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        break;
+    default:
+        return DefWindowProcW(hWnd, msg, wParam, lParam);
+    }
+    return 0;
+}
+
+// 创建隐藏的消息窗口
+HWND CreateMessageWindow()
+{
+    WNDCLASSEXW wc = {0};
+    wc.cbSize = sizeof(WNDCLASSEXW);
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = GetModuleHandle(NULL);
+    wc.lpszClassName = L"AutoLoginCQUClass";
+    RegisterClassExW(&wc);
+    
+    return CreateWindowExW(0, L"AutoLoginCQUClass", L"AutoLoginCQU",
+                           0, 0, 0, 0, 0, HWND_MESSAGE, NULL, 
+                           GetModuleHandle(NULL), NULL);
+}
+
+// 监控控制台窗口最小化的线程
+DWORD WINAPI ConsoleMonitorThread(LPVOID lpParam)
+{
+    while (WaitForSingleObject(g_hExitEvent, 200) == WAIT_TIMEOUT)
+    {
+        if (g_hConsole && !g_bMinimized)
+        {
+            if (IsIconic(g_hConsole))  // 窗口被最小化
+            {
+                HideToTray();
+            }
+        }
+    }
+    return 0;
+}
+
+// 键盘输入监控线程 (Ctrl+P) - 使用控制台输入事件，仅当焦点在控制台时生效
+DWORD WINAPI KeyboardMonitorThread(LPVOID lpParam)
+{
+    HANDLE hInput = GetStdHandle(STD_INPUT_HANDLE);
+    if (hInput == INVALID_HANDLE_VALUE)
+        return 1;
+    
+    // 保存原始控制台模式
+    DWORD oldMode;
+    GetConsoleMode(hInput, &oldMode);
+    // 启用窗口输入和鼠标输入，禁用行输入模式以便读取单个按键
+    SetConsoleMode(hInput, ENABLE_WINDOW_INPUT | ENABLE_MOUSE_INPUT);
+    
+    INPUT_RECORD inputRecord;
+    DWORD eventsRead;
+    
+    while (WaitForSingleObject(g_hExitEvent, 0) == WAIT_TIMEOUT)
+    {
+        // 等待输入事件，带超时
+        DWORD waitResult = WaitForSingleObject(hInput, 100);
+        if (waitResult == WAIT_OBJECT_0)
+        {
+            if (PeekConsoleInput(hInput, &inputRecord, 1, &eventsRead) && eventsRead > 0)
+            {
+                ReadConsoleInput(hInput, &inputRecord, 1, &eventsRead);
+                
+                if (inputRecord.EventType == KEY_EVENT && 
+                    inputRecord.Event.KeyEvent.bKeyDown)
+                {
+                    // 检测 Ctrl+P
+                    if ((inputRecord.Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) &&
+                        inputRecord.Event.KeyEvent.wVirtualKeyCode == 'P')
+                    {
+                        TogglePause();
+                    }
+                }
+            }
+        }
+    }
+    
+    // 恢复控制台模式
+    SetConsoleMode(hInput, oldMode);
+    return 0;
+}
+
+// 消息循环线程（同时负责创建窗口和托盘图标）
+DWORD WINAPI MessageLoopThread(LPVOID lpParam)
+{
+    // 在此线程中创建消息窗口和托盘图标
+    g_hWnd = CreateMessageWindow();
+    if (g_hWnd)
+    {
+        CreateTrayIcon(g_hWnd);
+    }
+    
+    MSG msg;
+    while (GetMessage(&msg, NULL, 0, 0))
+    {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+    return 0;
 }
 
 // ================= RAII 资源封装 =================
@@ -142,6 +376,17 @@ wstring ToWString(const string &str)
     wstring wstrTo(size_needed, 0);
     MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), &wstrTo[0], size_needed);
     return wstrTo;
+}
+
+// wstring 转 UTF-8 string
+string ToString(const wstring &wstr)
+{
+    if (wstr.empty())
+        return string();
+    int size_needed = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), NULL, 0, NULL, NULL);
+    string strTo(size_needed, 0);
+    WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), &strTo[0], size_needed, NULL, NULL);
+    return strTo;
 }
 
 // 获取本机 IP (IPv4 & IPv6)
@@ -212,7 +457,53 @@ bool GetLocalIPs(string &ipv4, string &ipv6)
 
 // ================= 核心逻辑 =================
 
-void PerformLogin(HINTERNET hConnect)
+// 解析主机名到 IP（优先 IPv4，回退 IPv6）
+bool ResolveHostToIP(const string &host, string &out_ip)
+{
+    out_ip.clear();
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    struct addrinfo *result = NULL;
+    int res = getaddrinfo(host.c_str(), NULL, &hints, &result);
+    if (res != 0 || result == NULL)
+        return false;
+
+    // 优先 IPv4
+    for (struct addrinfo *p = result; p != NULL; p = p->ai_next)
+    {
+        if (p->ai_family == AF_INET)
+        {
+            char ip[INET_ADDRSTRLEN] = {0};
+            struct sockaddr_in *sa = (struct sockaddr_in *)p->ai_addr;
+            inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
+            out_ip = ip;
+            freeaddrinfo(result);
+            return true;
+        }
+    }
+
+    // 再尝试 IPv6
+    for (struct addrinfo *p = result; p != NULL; p = p->ai_next)
+    {
+        if (p->ai_family == AF_INET6)
+        {
+            char ip[INET6_ADDRSTRLEN] = {0};
+            struct sockaddr_in6 *sa6 = (struct sockaddr_in6 *)p->ai_addr;
+            inet_ntop(AF_INET6, &sa6->sin6_addr, ip, sizeof(ip));
+            out_ip = ip;
+            freeaddrinfo(result);
+            return true;
+        }
+    }
+
+    freeaddrinfo(result);
+    return false;
+}
+
+void PerformLogin(HINTERNET hSession)
 {
     string ipv4, ipv6;
     if (!GetLocalIPs(ipv4, ipv6))
@@ -236,11 +527,35 @@ void PerformLogin(HINTERNET hConnect)
 
     wstring fullPath = LOGIN_PATH_BASE + L"?" + ToWString(ss.str());
 
-    // 创建请求
-    ScopedWinHttp hRequest(WinHttpOpenRequest(hConnect, L"GET", fullPath.c_str(),
+    // 确定目标服务器 IP：优先使用配置文件中的 SERVER_IP，否则尝试 DNS 解析
+    string resolvedIP;
+    if (!SERVER_IP.empty())
+    {
+        resolvedIP = SERVER_IP;
+        cout << "[信息] 使用配置的服务器 IP: " << resolvedIP << endl;
+    }
+    else if (!ResolveHostToIP(ToString(LOGIN_HOST), resolvedIP))
+    {
+        cerr << "[错误] 无法解析主机名到 IP: " << ToString(LOGIN_HOST) << endl;
+        cerr << "[提示] 请在 config.ini 中添加 SERVER_IP=xxx.xxx.xxx.xxx 手动指定服务器 IP" << endl;
+        cerr << "[提示] 可通过 nslookup login.cqu.edu.cn 查询正确的 IP 地址" << endl;
+        return;
+    }
+
+    // 使用解析到的 IP 建立连接（每次重建，确保解析是最新的）
+    wstring wsIp = ToWString(resolvedIP);
+    ScopedWinHttp hConnect(WinHttpConnect(hSession, wsIp.c_str(), LOGIN_PORT, 0));
+    if (!hConnect)
+    {
+        cerr << "[错误] WinHttpConnect 失败 (IP: " << resolvedIP << "): " << GetLastError() << endl;
+        return;
+    }
+
+    // 创建请求（HTTPS）
+    ScopedWinHttp hRequest(WinHttpOpenRequest(hConnect.get(), L"GET", fullPath.c_str(),
                                               NULL, WINHTTP_NO_REFERER,
                                               WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                              WINHTTP_FLAG_SECURE)); // HTTPS
+                                              WINHTTP_FLAG_SECURE));
 
     if (!hRequest)
     {
@@ -253,6 +568,10 @@ void PerformLogin(HINTERNET hConnect)
                     SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
                     SECURITY_FLAG_IGNORE_CERT_DATE_INVALID;
     WinHttpSetOption(hRequest.get(), WINHTTP_OPTION_SECURITY_FLAGS, &dwFlags, sizeof(dwFlags));
+
+    // 添加 Host 头以便服务器识别虚拟主机（使用原始主机名）
+    wstring hostHeader = L"Host: " + LOGIN_HOST;
+    WinHttpAddRequestHeaders(hRequest.get(), hostHeader.c_str(), (ULONG)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
 
     // 发送请求
     if (WinHttpSendRequest(hRequest.get(), WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0))
@@ -333,14 +652,29 @@ int main()
     LoadConfig();
 
     g_hExitEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+    g_hPauseEvent = CreateEvent(NULL, FALSE, FALSE, NULL);  // 自动重置事件
+    
     if (!SetConsoleCtrlHandler(ConsoleHandler, TRUE))
     {
         cerr << "无法设置控制台处理程序。" << endl;
         return 1;
     }
 
+    // 获取控制台窗口句柄
+    g_hConsole = GetConsoleWindow();
+    
+    // 启动监控线程（消息循环线程会创建托盘图标）
+    HANDLE hConsoleMonitor = CreateThread(NULL, 0, ConsoleMonitorThread, NULL, 0, NULL);
+    HANDLE hKeyboardMonitor = CreateThread(NULL, 0, KeyboardMonitorThread, NULL, 0, NULL);
+    HANDLE hMessageLoop = CreateThread(NULL, 0, MessageLoopThread, NULL, 0, NULL);
+    
+    // 等待托盘图标创建完成
+    Sleep(100);
+
     cout << "=== CQU 自动登录服务已启动 ===" << endl;
     cout << "按 Ctrl+C 或关闭窗口可安全退出。" << endl;
+    cout << "按 Ctrl+P 暂停/继续服务。" << endl;
+    cout << "最小化窗口将隐藏到系统托盘。" << endl;
 
     // 2. 初始化 WinHTTP 会话 (RAII)
     // WINHTTP_ACCESS_TYPE_NO_PROXY: 强制绕过系统代理，直连
@@ -356,32 +690,50 @@ int main()
 
     WinHttpSetTimeouts(hSession.get(), TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS);
 
-    // 3. 建立连接 (保持连接复用)
-    ScopedWinHttp hConnect(WinHttpConnect(hSession.get(), LOGIN_HOST.c_str(), LOGIN_PORT, 0));
-    if (!hConnect)
+    // 初始化 Winsock，用于 getaddrinfo/inet_ntop 等函数（ResolveHostToIP 使用）
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
     {
-        cerr << "WinHttpConnect 失败。" << endl;
+        cerr << "WSAStartup 失败。" << endl;
         return 1;
     }
 
     // 4. 主循环
+
     while (true)
     {
-        PerformLogin(hConnect.get());
+        // 检查是否暂停
+        if (!g_bPaused)
+        {
+            PerformLogin(hSession.get());
+        }
 
-        // 等待间隔，同时监听退出事件
-        // 如果 g_hExitEvent 被触发 (Ctrl+C)，WaitForSingleObject 会立即返回 WAIT_OBJECT_0
-        DWORD waitResult = WaitForSingleObject(g_hExitEvent, CHECK_INTERVAL_MS);
-        if (waitResult == WAIT_OBJECT_0)
+        // 等待间隔，同时监听退出事件和暂停唤醒事件
+        HANDLE handles[] = {g_hExitEvent, g_hPauseEvent};
+        DWORD waitResult = WaitForMultipleObjects(2, handles, FALSE, CHECK_INTERVAL_MS);
+        
+        if (waitResult == WAIT_OBJECT_0)  // 退出事件
         {
             cout << "\n正在退出..." << endl;
             break;
         }
+        // WAIT_OBJECT_0 + 1 表示暂停事件被触发（继续），继续下一轮循环
     }
 
     // 5. 资源清理
+    RemoveTrayIcon();
+    
+    // 等待线程结束
+    if (hConsoleMonitor) { WaitForSingleObject(hConsoleMonitor, 500); CloseHandle(hConsoleMonitor); }
+    if (hKeyboardMonitor) { WaitForSingleObject(hKeyboardMonitor, 500); CloseHandle(hKeyboardMonitor); }
+    if (hMessageLoop) { PostMessage(g_hWnd, WM_QUIT, 0, 0); WaitForSingleObject(hMessageLoop, 500); CloseHandle(hMessageLoop); }
+    
+    if (g_hWnd) DestroyWindow(g_hWnd);
+    
     // ScopedWinHttp 析构函数会自动调用 WinHttpCloseHandle
     // 操作系统会自动回收进程内存
+    WSACleanup();
+    CloseHandle(g_hPauseEvent);
     CloseHandle(g_hExitEvent);
     cout << "程序已安全结束。" << endl;
     return 0;
