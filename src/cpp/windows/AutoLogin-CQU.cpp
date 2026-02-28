@@ -24,7 +24,7 @@ const wstring LOGIN_PATH_BASE = L"/eportal/portal/login";
 // ================= 全局配置变量 =================
 string USER_ACCOUNT;
 string USER_PASSWORD;
-string SERVER_IP;  // 可选：直接指定服务器 IP，绕过 DNS 解析
+string SERVER_IP; // 可选：直接指定服务器 IP，绕过 DNS 解析
 DWORD CHECK_INTERVAL_MS = 20000;
 DWORD TIMEOUT_MS = 5000;
 
@@ -74,9 +74,9 @@ void LoadConfig()
 
 // ================= 全局控制 =================
 HANDLE g_hExitEvent = NULL;
-HANDLE g_hPauseEvent = NULL;  // 暂停事件
-bool g_bPaused = false;       // 暂停状态
-bool g_bMinimized = false;    // 最小化状态
+HANDLE g_hPauseEvent = NULL; // 暂停事件
+bool g_bPaused = false;      // 暂停状态
+bool g_bMinimized = false;   // 最小化状态
 
 // 系统托盘相关
 #define WM_TRAYICON (WM_USER + 1)
@@ -84,8 +84,8 @@ bool g_bMinimized = false;    // 最小化状态
 #define ID_TRAY_PAUSE 1002
 #define ID_TRAY_EXIT 1003
 NOTIFYICONDATAW g_nid = {0};
-HWND g_hWnd = NULL;           // 消息窗口句柄
-HWND g_hConsole = NULL;       // 控制台窗口句柄
+HWND g_hWnd = NULL;     // 消息窗口句柄
+HWND g_hConsole = NULL; // 控制台窗口句柄
 
 // 控制台信号处理 (Ctrl+C, 关闭窗口等)
 BOOL WINAPI ConsoleHandler(DWORD signal)
@@ -141,9 +141,9 @@ void TogglePause()
     else
     {
         cout << "[信息] 服务已继续" << endl;
-        SetEvent(g_hPauseEvent);  // 唤醒主循环
+        SetEvent(g_hPauseEvent); // 唤醒主循环
     }
-    
+
     // 更新托盘提示
     if (g_bPaused)
         wcscpy_s(g_nid.szTip, L"CQU 自动登录 - 已暂停");
@@ -176,13 +176,13 @@ void ShowTrayMenu(HWND hWnd)
 {
     POINT pt;
     GetCursorPos(&pt);
-    
+
     HMENU hMenu = CreatePopupMenu();
     AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHOW, L"显示");
     AppendMenuW(hMenu, MF_STRING, ID_TRAY_PAUSE, g_bPaused ? L"继续" : L"暂停");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"退出");
-    
+
     SetForegroundWindow(hWnd);
     TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hWnd, NULL);
     DestroyMenu(hMenu);
@@ -235,9 +235,9 @@ HWND CreateMessageWindow()
     wc.hInstance = GetModuleHandle(NULL);
     wc.lpszClassName = L"AutoLoginCQUClass";
     RegisterClassExW(&wc);
-    
+
     return CreateWindowExW(0, L"AutoLoginCQUClass", L"AutoLoginCQU",
-                           0, 0, 0, 0, 0, HWND_MESSAGE, NULL, 
+                           0, 0, 0, 0, 0, HWND_MESSAGE, NULL,
                            GetModuleHandle(NULL), NULL);
 }
 
@@ -248,7 +248,7 @@ DWORD WINAPI ConsoleMonitorThread(LPVOID lpParam)
     {
         if (g_hConsole && !g_bMinimized)
         {
-            if (IsIconic(g_hConsole))  // 窗口被最小化
+            if (IsIconic(g_hConsole)) // 窗口被最小化
             {
                 HideToTray();
             }
@@ -263,16 +263,16 @@ DWORD WINAPI KeyboardMonitorThread(LPVOID lpParam)
     HANDLE hInput = GetStdHandle(STD_INPUT_HANDLE);
     if (hInput == INVALID_HANDLE_VALUE)
         return 1;
-    
+
     // 保存原始控制台模式
     DWORD oldMode;
     GetConsoleMode(hInput, &oldMode);
     // 启用窗口输入和鼠标输入，禁用行输入模式以便读取单个按键
     SetConsoleMode(hInput, ENABLE_WINDOW_INPUT | ENABLE_MOUSE_INPUT);
-    
+
     INPUT_RECORD inputRecord;
     DWORD eventsRead;
-    
+
     while (WaitForSingleObject(g_hExitEvent, 0) == WAIT_TIMEOUT)
     {
         // 等待输入事件，带超时
@@ -282,8 +282,8 @@ DWORD WINAPI KeyboardMonitorThread(LPVOID lpParam)
             if (PeekConsoleInput(hInput, &inputRecord, 1, &eventsRead) && eventsRead > 0)
             {
                 ReadConsoleInput(hInput, &inputRecord, 1, &eventsRead);
-                
-                if (inputRecord.EventType == KEY_EVENT && 
+
+                if (inputRecord.EventType == KEY_EVENT &&
                     inputRecord.Event.KeyEvent.bKeyDown)
                 {
                     // 检测 Ctrl+P
@@ -296,7 +296,7 @@ DWORD WINAPI KeyboardMonitorThread(LPVOID lpParam)
             }
         }
     }
-    
+
     // 恢复控制台模式
     SetConsoleMode(hInput, oldMode);
     return 0;
@@ -311,7 +311,7 @@ DWORD WINAPI MessageLoopThread(LPVOID lpParam)
     {
         CreateTrayIcon(g_hWnd);
     }
-    
+
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0))
     {
@@ -395,6 +395,7 @@ bool GetLocalIPs(string &ipv4, string &ipv6)
     ipv4.clear();
     ipv6.clear();
     string fallback_ipv4;
+    string nat_fallback_ipv4; // 最低优先：192.168.x.x（家用路由器 LAN 地址）
 
     ULONG outBufLen = 15000;
     ScopedMalloc pAddresses(malloc(outBufLen));
@@ -420,9 +421,17 @@ bool GetLocalIPs(string &ipv4, string &ipv6)
                 if (pUni->Address.lpSockaddr->sa_family == AF_INET)
                 {
                     string s_ip = ip;
-                    // 排除 127.x.x.x 和 198.18.x.x (常见 VPN 保留地址)
-                    if (s_ip.find("127.") == 0 || s_ip.find("198.18.") == 0)
+                    // 排除回环、APIPA (169.254.x.x)、VPN 保留地址 (198.18.x.x)
+                    if (s_ip.find("127.") == 0 || s_ip.find("169.254.") == 0 || s_ip.find("198.18.") == 0)
                         continue;
+
+                    // 192.168.x.x 是路由器 LAN 地址，降为最低优先兜底
+                    if (s_ip.find("192.168.") == 0)
+                    {
+                        if (nat_fallback_ipv4.empty())
+                            nat_fallback_ipv4 = s_ip;
+                        continue;
+                    }
 
                     // 优先选择物理网卡 (以太网 或 Wi-Fi)
                     if (pCurr->IfType == IF_TYPE_ETHERNET_CSMACD || pCurr->IfType == IF_TYPE_IEEE80211)
@@ -450,6 +459,13 @@ bool GetLocalIPs(string &ipv4, string &ipv6)
     if (ipv4.empty() && !fallback_ipv4.empty())
     {
         ipv4 = fallback_ipv4;
+    }
+
+    // 最后兜底：仅有 192.168.x.x（设备在路由器 NAT 后方）
+    if (ipv4.empty() && !nat_fallback_ipv4.empty())
+    {
+        ipv4 = nat_fallback_ipv4;
+        cout << "[警告] 当前 IP (" << ipv4 << ") 为路由器内网地址，设备可能处于 NAT 后方，认证可能失败。" << endl;
     }
 
     return !ipv4.empty();
@@ -652,8 +668,8 @@ int main()
     LoadConfig();
 
     g_hExitEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
-    g_hPauseEvent = CreateEvent(NULL, FALSE, FALSE, NULL);  // 自动重置事件
-    
+    g_hPauseEvent = CreateEvent(NULL, FALSE, FALSE, NULL); // 自动重置事件
+
     if (!SetConsoleCtrlHandler(ConsoleHandler, TRUE))
     {
         cerr << "无法设置控制台处理程序。" << endl;
@@ -662,12 +678,12 @@ int main()
 
     // 获取控制台窗口句柄
     g_hConsole = GetConsoleWindow();
-    
+
     // 启动监控线程（消息循环线程会创建托盘图标）
     HANDLE hConsoleMonitor = CreateThread(NULL, 0, ConsoleMonitorThread, NULL, 0, NULL);
     HANDLE hKeyboardMonitor = CreateThread(NULL, 0, KeyboardMonitorThread, NULL, 0, NULL);
     HANDLE hMessageLoop = CreateThread(NULL, 0, MessageLoopThread, NULL, 0, NULL);
-    
+
     // 等待托盘图标创建完成
     Sleep(100);
 
@@ -711,8 +727,8 @@ int main()
         // 等待间隔，同时监听退出事件和暂停唤醒事件
         HANDLE handles[] = {g_hExitEvent, g_hPauseEvent};
         DWORD waitResult = WaitForMultipleObjects(2, handles, FALSE, CHECK_INTERVAL_MS);
-        
-        if (waitResult == WAIT_OBJECT_0)  // 退出事件
+
+        if (waitResult == WAIT_OBJECT_0) // 退出事件
         {
             cout << "\n正在退出..." << endl;
             break;
@@ -722,14 +738,28 @@ int main()
 
     // 5. 资源清理
     RemoveTrayIcon();
-    
+
     // 等待线程结束
-    if (hConsoleMonitor) { WaitForSingleObject(hConsoleMonitor, 500); CloseHandle(hConsoleMonitor); }
-    if (hKeyboardMonitor) { WaitForSingleObject(hKeyboardMonitor, 500); CloseHandle(hKeyboardMonitor); }
-    if (hMessageLoop) { PostMessage(g_hWnd, WM_QUIT, 0, 0); WaitForSingleObject(hMessageLoop, 500); CloseHandle(hMessageLoop); }
-    
-    if (g_hWnd) DestroyWindow(g_hWnd);
-    
+    if (hConsoleMonitor)
+    {
+        WaitForSingleObject(hConsoleMonitor, 500);
+        CloseHandle(hConsoleMonitor);
+    }
+    if (hKeyboardMonitor)
+    {
+        WaitForSingleObject(hKeyboardMonitor, 500);
+        CloseHandle(hKeyboardMonitor);
+    }
+    if (hMessageLoop)
+    {
+        PostMessage(g_hWnd, WM_QUIT, 0, 0);
+        WaitForSingleObject(hMessageLoop, 500);
+        CloseHandle(hMessageLoop);
+    }
+
+    if (g_hWnd)
+        DestroyWindow(g_hWnd);
+
     // ScopedWinHttp 析构函数会自动调用 WinHttpCloseHandle
     // 操作系统会自动回收进程内存
     WSACleanup();

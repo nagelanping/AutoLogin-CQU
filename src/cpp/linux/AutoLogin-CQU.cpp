@@ -25,7 +25,7 @@ const int LOGIN_PORT = 802;
 const string LOGIN_PATH = "/eportal/portal/login";
 string USER_ACCOUNT = "";
 string USER_PASSWORD = "";
-string SERVER_IP = "";  // 可选：直接指定服务器 IP，绕过 DNS 解析
+string SERVER_IP = ""; // 可选：直接指定服务器 IP，绕过 DNS 解析
 int CHECK_INTERVAL_SEC = 20;
 long TIMEOUT_SEC = 5;
 
@@ -186,6 +186,7 @@ bool GetLocalIPs(string &ipv4, string &ipv6)
     ipv4.clear();
     ipv6.clear();
     string fallback_ipv4;
+    string nat_fallback_ipv4; // 最低优先：192.168.x.x（家用路由器 LAN 地址）
 
     struct ifaddrs *ifaddr, *ifa;
     if (getifaddrs(&ifaddr) == -1)
@@ -221,9 +222,17 @@ bool GetLocalIPs(string &ipv4, string &ipv6)
             if (family == AF_INET)
             {
                 string s_ip = host;
-                // 排除 127.x.x.x 和 198.18.x.x (常见 VPN 保留地址)
-                if (s_ip.find("127.") == 0 || s_ip.find("198.18.") == 0)
+                // 排除回环、APIPA (169.254.x.x)、VPN 保留地址 (198.18.x.x)
+                if (s_ip.find("127.") == 0 || s_ip.find("169.254.") == 0 || s_ip.find("198.18.") == 0)
                     continue;
+
+                // 192.168.x.x 是路由器 LAN 地址，降为最低优先兜底
+                if (s_ip.find("192.168.") == 0)
+                {
+                    if (nat_fallback_ipv4.empty())
+                        nat_fallback_ipv4 = s_ip;
+                    continue;
+                }
 
                 // 简单的启发式优先级: e*(ethernet), w*(wireless) 优先
                 string ifname = ifa->ifa_name;
@@ -261,6 +270,13 @@ bool GetLocalIPs(string &ipv4, string &ipv6)
     if (ipv4.empty() && !fallback_ipv4.empty())
     {
         ipv4 = fallback_ipv4;
+    }
+
+    // 最后兜底：仅有 192.168.x.x（设备在路由器 NAT 后方）
+    if (ipv4.empty() && !nat_fallback_ipv4.empty())
+    {
+        ipv4 = nat_fallback_ipv4;
+        cerr << "autologin-cqu: warning: using NAT address (" << ipv4 << "), device may be behind router" << endl;
     }
 
     return !ipv4.empty();
@@ -314,7 +330,7 @@ void PerformLogin(CURL *curl)
 
     // 设置请求选项
     curl_easy_setopt(curl, CURLOPT_URL, fullUrl.c_str());
-    
+
     // 添加 Host 头以便服务器识别虚拟主机（使用原始主机名）
     struct curl_slist *headers = NULL;
     string hostHeader = "Host: " + LOGIN_HOST;
@@ -326,7 +342,7 @@ void PerformLogin(CURL *curl)
 
     // 执行请求
     CURLcode res = curl_easy_perform(curl);
-    
+
     // 清理 headers
     curl_slist_free_all(headers);
 
@@ -340,7 +356,7 @@ void PerformLogin(CURL *curl)
     {
         // 请求成功后恢复连接复用
         curl_easy_setopt(curl, CURLOPT_FRESH_CONNECT, 0L);
-        
+
         long response_code;
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
         if (response_code == 200)
