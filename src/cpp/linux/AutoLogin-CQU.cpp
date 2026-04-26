@@ -13,6 +13,9 @@
 #include <arpa/inet.h>
 #include <curl/curl.h>
 #include <fstream>
+#include <algorithm>
+#include <limits>
+#include <sysexits.h>
 
 // 编译指令: g++ AutoLogin-CQU.cpp -o AutoLogin-CQU -lcurl -O2
 // 依赖项:  curl
@@ -22,10 +25,14 @@ using namespace std;
 // ================= 配置变量 =================
 const string LOGIN_HOST = "login.cqu.edu.cn";
 const int LOGIN_PORT = 802;
+const int CONFIG_ERROR_EXIT_CODE = EX_CONFIG;
+const size_t MAX_RESPONSE_BYTES = 4096;
 const string LOGIN_PATH = "/eportal/portal/login";
-string USER_ACCOUNT = "";
+const string USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+string STUDENT_ID = "";
 string USER_PASSWORD = "";
-string SERVER_IP = ""; // 可选：直接指定服务器 IP，绕过 DNS 解析
+string SERVER_IP = "";
+string LOGIN_IP = "";
 int CHECK_INTERVAL_SEC = 20;
 long TIMEOUT_SEC = 5;
 
@@ -35,6 +42,7 @@ volatile sig_atomic_t g_running = 1;
 // 信号处理函数
 void SignalHandler(int signum)
 {
+    (void)signum;
     g_running = 0;
 }
 
@@ -73,6 +81,55 @@ string Trim(const string &str)
     return str.substr(first, (last - first + 1));
 }
 
+string StripInlineComment(const string &value)
+{
+    bool inSingleQuote = false;
+    bool inDoubleQuote = false;
+
+    for (size_t i = 0; i < value.size(); ++i)
+    {
+        char c = value[i];
+        if (c == '\'' && !inDoubleQuote)
+            inSingleQuote = !inSingleQuote;
+        else if (c == '"' && !inSingleQuote)
+            inDoubleQuote = !inDoubleQuote;
+        else if (c == '#' && !inSingleQuote && !inDoubleQuote)
+            return value.substr(0, i);
+    }
+
+    return value;
+}
+
+string UnquoteYamlValue(const string &value)
+{
+    string result = Trim(StripInlineComment(value));
+    if (result.size() >= 2)
+    {
+        char first = result.front();
+        char last = result.back();
+        if ((first == '"' && last == '"') || (first == '\'' && last == '\''))
+            return result.substr(1, result.size() - 2);
+    }
+    return result;
+}
+
+long ParsePositiveLong(const string &value, long defaultValue)
+{
+    if (value.empty())
+        return defaultValue;
+
+    try
+    {
+        size_t parsedLength = 0;
+        long parsed = stol(value, &parsedLength);
+        return parsedLength == value.size() && parsed > 0 ? parsed : defaultValue;
+    }
+    catch (...)
+    {
+        return defaultValue;
+    }
+}
+
 // 加载配置文件
 bool LoadConfig(const string &filename)
 {
@@ -85,29 +142,29 @@ bool LoadConfig(const string &filename)
     string line;
     while (getline(file, line))
     {
-        line = Trim(line);
-        if (line.empty() || line[0] == ';' || line[0] == '#')
-            continue;
-        if (line[0] == '[')
+        string trimmed = Trim(line);
+        if (trimmed.empty() || trimmed[0] == '#')
             continue;
 
-        size_t delimiterPos = line.find('=');
-        if (delimiterPos != string::npos)
-        {
-            string key = Trim(line.substr(0, delimiterPos));
-            string value = Trim(line.substr(delimiterPos + 1));
+        size_t delimiterPos = trimmed.find(':');
+        if (delimiterPos == string::npos)
+            continue;
 
-            if (key == "STUDENT_ID")
-                USER_ACCOUNT = ",0," + value;
-            else if (key == "USER_PASSWORD")
-                USER_PASSWORD = value;
-            else if (key == "SERVER_IP")
-                SERVER_IP = value;
-            else if (key == "CHECK_INTERVAL")
-                CHECK_INTERVAL_SEC = stoi(value);
-            else if (key == "TIMEOUT")
-                TIMEOUT_SEC = stol(value);
-        }
+        string key = Trim(trimmed.substr(0, delimiterPos));
+        string value = UnquoteYamlValue(trimmed.substr(delimiterPos + 1));
+
+        if (key == "STUDENT_ID")
+            STUDENT_ID = value;
+        else if (key == "USER_PASSWORD")
+            USER_PASSWORD = value;
+        else if (key == "SERVER_IP")
+            SERVER_IP = value;
+        else if (key == "LOGIN_IP")
+            LOGIN_IP = value;
+        else if (key == "CHECK_INTERVAL")
+            CHECK_INTERVAL_SEC = static_cast<int>(min(ParsePositiveLong(value, CHECK_INTERVAL_SEC), static_cast<long>(numeric_limits<int>::max())));
+        else if (key == "TIMEOUT")
+            TIMEOUT_SEC = ParsePositiveLong(value, TIMEOUT_SEC);
     }
     return true;
 }
@@ -282,124 +339,204 @@ bool GetLocalIPs(string &ipv4, string &ipv6)
     return !ipv4.empty();
 }
 
-// libcurl 写回调 (保存响应内容)
 size_t WriteCallback(void *contents, size_t size, size_t nmemb, void *userp)
 {
-    ((string *)userp)->append((char *)contents, size * nmemb);
-    return size * nmemb;
+    string *response = static_cast<string *>(userp);
+    size_t bytes = size * nmemb;
+    size_t available = MAX_RESPONSE_BYTES > response->size() ? MAX_RESPONSE_BYTES - response->size() : 0;
+    response->append(static_cast<char *>(contents), min(bytes, available));
+    return bytes;
 }
 
-// ================= 核心逻辑 =================
-
-void PerformLogin(CURL *curl)
+enum class LoginResult
 {
-    string ipv4, ipv6;
-    if (!GetLocalIPs(ipv4, ipv6))
-    {
-        cerr << "autologin-cqu: error: failed to get local IPv4 address" << endl;
-        return;
-    }
+    Success,
+    AlreadyOnline,
+    Failed
+};
 
-    // 确定目标服务器 IP：优先使用配置文件中的 SERVER_IP，否则尝试 DNS 解析
-    string resolvedIP;
-    if (!SERVER_IP.empty())
-    {
-        resolvedIP = SERVER_IP;
-    }
-    else if (!ResolveHostToIP(LOGIN_HOST, resolvedIP))
-    {
-        cerr << "autologin-cqu: error: failed to resolve host " << LOGIN_HOST << endl;
-        return;
-    }
+LoginResult ClassifyLoginResponse(const string &response)
+{
+    if (response.find("\"result\":1") != string::npos)
+        return LoginResult::Success;
 
-    // 构建 URL 参数（使用解析的 IP 地址）
+    if (response.find("\"ret_code\":2") != string::npos)
+        return LoginResult::AlreadyOnline;
+
+    if (response.find("\"result\":0") != string::npos &&
+        response.find("\"ret_code\":1") != string::npos &&
+        response.find("Welcome to Drcom System") != string::npos)
+        return LoginResult::AlreadyOnline;
+
+    return LoginResult::Failed;
+}
+
+string TruncateForLog(const string &value)
+{
+    const size_t maxLogBytes = 1024;
+    if (value.size() <= maxLogBytes)
+        return value;
+
+    return value.substr(0, maxLogBytes) + "...<truncated>";
+}
+
+string BuildLoginUrl(const string &resolvedIP, const string &loginIpv4, const string &ipv6)
+{
     stringstream ss;
     ss << "https://" << resolvedIP << ":" << LOGIN_PORT << LOGIN_PATH << "?"
        << "callback=dr1004"
        << "&login_method=1"
-       << "&user_account=" << UrlEncode(USER_ACCOUNT)
+       << "&user_account=" << UrlEncode(",0," + STUDENT_ID)
        << "&user_password=" << UrlEncode(USER_PASSWORD)
-       << "&wlan_user_ip=" << UrlEncode(ipv4)
+       << "&wlan_user_ip=" << UrlEncode(loginIpv4)
        << "&wlan_user_ipv6=" << UrlEncode(ipv6)
        << "&wlan_user_mac=000000000000"
        << "&wlan_ac_ip=&wlan_ac_name="
-       << "&term_ua=" << UrlEncode("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+       << "&term_ua=" << UrlEncode(USER_AGENT)
        << "&term_type=1&jsVersion=4.2.2&terminal_type=1&lang=zh-cn,zh&v=6231";
 
-    string fullUrl = ss.str();
+    return ss.str();
+}
 
-    // 设置请求选项
+bool GetLocalIPv6(string &ipv6)
+{
+    ipv6.clear();
+    struct ifaddrs *ifaddr;
+    if (getifaddrs(&ifaddr) == -1)
+    {
+        perror("getifaddrs");
+        return false;
+    }
+
+    unique_ptr<struct ifaddrs, void (*)(struct ifaddrs *)> ptr_guard(ifaddr, freeifaddrs);
+    for (struct ifaddrs *ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next)
+    {
+        if (ifa->ifa_addr == NULL || ifa->ifa_addr->sa_family != AF_INET6)
+            continue;
+        if ((ifa->ifa_flags & IFF_LOOPBACK) || !(ifa->ifa_flags & IFF_UP))
+            continue;
+
+        char host[NI_MAXHOST];
+        int s = getnameinfo(ifa->ifa_addr, sizeof(struct sockaddr_in6), host, NI_MAXHOST, NULL, 0, NI_NUMERICHOST);
+        if (s != 0 || strncmp(host, "fe80", 4) == 0)
+            continue;
+
+        ipv6 = host;
+        size_t pos = ipv6.find('%');
+        if (pos != string::npos)
+            ipv6 = ipv6.substr(0, pos);
+        return true;
+    }
+
+    return false;
+}
+
+bool GetLoginAddresses(string &loginIpv4, string &ipv6)
+{
+    if (!LOGIN_IP.empty())
+    {
+        loginIpv4 = LOGIN_IP;
+        GetLocalIPv6(ipv6);
+        return true;
+    }
+
+    if (!GetLocalIPs(loginIpv4, ipv6))
+    {
+        cerr << "autologin-cqu: error: failed to get local IPv4 address" << endl;
+        return false;
+    }
+
+    return true;
+}
+
+bool GetPortalAddress(string &resolvedIP)
+{
+    if (!SERVER_IP.empty())
+    {
+        resolvedIP = SERVER_IP;
+        return true;
+    }
+
+    static string cachedResolvedIP;
+    if (!cachedResolvedIP.empty())
+    {
+        resolvedIP = cachedResolvedIP;
+        return true;
+    }
+
+    if (!ResolveHostToIP(LOGIN_HOST, cachedResolvedIP))
+    {
+        cerr << "autologin-cqu: error: failed to resolve host " << LOGIN_HOST << endl;
+        return false;
+    }
+
+    resolvedIP = cachedResolvedIP;
+    return true;
+}
+
+void PerformLogin(CURL *curl)
+{
+    string loginIpv4, ipv6;
+    if (!GetLoginAddresses(loginIpv4, ipv6))
+        return;
+
+    string resolvedIP;
+    if (!GetPortalAddress(resolvedIP))
+        return;
+
+    string fullUrl = BuildLoginUrl(resolvedIP, loginIpv4, ipv6);
     curl_easy_setopt(curl, CURLOPT_URL, fullUrl.c_str());
-
-    // 添加 Host 头以便服务器识别虚拟主机（使用原始主机名）
-    struct curl_slist *headers = NULL;
-    string hostHeader = "Host: " + LOGIN_HOST;
-    headers = curl_slist_append(headers, hostHeader.c_str());
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 
     string response;
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
 
-    // 执行请求
     CURLcode res = curl_easy_perform(curl);
-
-    // 清理 headers
-    curl_slist_free_all(headers);
-
     if (res != CURLE_OK)
     {
         cerr << "autologin-cqu: error: request failed: " << curl_easy_strerror(res) << endl;
-        // 请求失败时重置连接，避免使用失效的连接池
-        curl_easy_setopt(curl, CURLOPT_FRESH_CONNECT, 1L);
+        return;
     }
-    else
+
+    long responseCode = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &responseCode);
+    if (responseCode != 200)
     {
-        // 请求成功后恢复连接复用
-        curl_easy_setopt(curl, CURLOPT_FRESH_CONNECT, 0L);
+        cerr << "autologin-cqu: warning: http status " << responseCode << endl;
+        return;
+    }
 
-        long response_code;
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
-        if (response_code == 200)
-        {
-            // 解析简单的 JSON 响应
-            // 成功: "result":1
-            // 已在线: "ret_code":2
-            bool isSuccess = (response.find("\"result\":1") != string::npos);
-            bool isOnline = (response.find("\"ret_code\":2") != string::npos);
-
-            if (isSuccess || isOnline)
-            {
-                cout << "autologin-cqu: " << (isOnline ? "already online" : "login success") << " ip=" << ipv4 << endl;
-            }
-            else
-            {
-                // 登录失败时也重置连接
-                curl_easy_setopt(curl, CURLOPT_FRESH_CONNECT, 1L);
-                // 输出详细的失败原因
-                cerr << "autologin-cqu: login failed ip=" << ipv4 << " response=" << response << endl;
-            }
-        }
-        else
-        {
-            // HTTP 状态码异常时重置连接
-            curl_easy_setopt(curl, CURLOPT_FRESH_CONNECT, 1L);
-            cerr << "autologin-cqu: warning: http status " << response_code << endl;
-        }
+    switch (ClassifyLoginResponse(response))
+    {
+    case LoginResult::Success:
+        cout << "autologin-cqu: login success ip=" << loginIpv4 << endl;
+        break;
+    case LoginResult::AlreadyOnline:
+        cout << "autologin-cqu: already online ip=" << loginIpv4 << endl;
+        break;
+    case LoginResult::Failed:
+        cerr << "autologin-cqu: login failed ip=" << loginIpv4 << " response=" << TruncateForLog(response) << endl;
+        break;
     }
 }
 
 int main()
 {
     // 0. 加载配置
-    if (!LoadConfig("config.ini"))
+    if (!LoadConfig("config.yaml"))
     {
-        cerr << "autologin-cqu: warning: config.ini not found" << endl;
+        cerr << "autologin-cqu: error: config.yaml not found" << endl;
+        return CONFIG_ERROR_EXIT_CODE;
     }
 
-    if (USER_ACCOUNT.empty() || USER_PASSWORD.empty())
+    if (STUDENT_ID.empty() || USER_PASSWORD.empty())
     {
         cerr << "autologin-cqu: error: account or password not configured" << endl;
-        return 1;
+        return CONFIG_ERROR_EXIT_CODE;
+    }
+
+    if (!LOGIN_IP.empty())
+    {
+        cout << "autologin-cqu: using configured login ip=" << LOGIN_IP << endl;
     }
 
     // 1. 信号处理
@@ -419,18 +556,22 @@ int main()
         return 1;
     }
 
-    // 3. 设置持久化选项 (复用连接)
-    // 绕过系统代理
+    // 3. 设置 libcurl 选项
     curl_easy_setopt(curl.get(), CURLOPT_PROXY, "");
-    // 设置超时
     curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT, TIMEOUT_SEC);
-    // 设置回调，避免输出响应体到 stdout
     curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, WriteCallback);
-    // 启用 TCP Keep-Alive
     curl_easy_setopt(curl.get(), CURLOPT_TCP_KEEPALIVE, 1L);
-    // 不验证 SSL 证书 (校园网自签名证书可能导致问题)
     curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYHOST, 0L);
+
+    string hostHeader = "Host: " + LOGIN_HOST;
+    unique_ptr<curl_slist, decltype(&curl_slist_free_all)> headers(curl_slist_append(NULL, hostHeader.c_str()), curl_slist_free_all);
+    if (!headers)
+    {
+        cerr << "autologin-cqu: error: curl header init failed" << endl;
+        return 1;
+    }
+    curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, headers.get());
 
     cout << "autologin-cqu: started interval=" << CHECK_INTERVAL_SEC << "s" << endl;
 

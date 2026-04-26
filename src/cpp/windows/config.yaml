@@ -1,0 +1,19 @@
+# 上网账号（学号）
+STUDENT_ID: xxxxxxxx
+
+# 用户密码
+USER_PASSWORD: xxxxxx
+
+# 服务器 IP（可选，用于绕过 DNS 解析，启用 DoH 时建议填写）
+# 可通过 nslookup login.cqu.edu.cn 查询 IP
+SERVER_IP: ""
+
+# 登录使用的客户端 IPv4（可选）
+# 接入路由器时，可填写路由器 WAN 侧在校园网中的 IPv4，由本机代替路由器进行登录
+LOGIN_IP: ""
+
+# 检查网络连接的间隔时间（秒）
+CHECK_INTERVAL: 20
+
+# 请求超时时间（秒）
+TIMEOUT: 5

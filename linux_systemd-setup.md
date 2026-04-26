@@ -1,223 +1,302 @@
-# AutoLogin-CQU 开机启动配置教程
+# AutoLogin-CQU Linux systemd 配置说明
 
-本教程指导如何将 AutoLogin-CQU 配置为 systemd 开机自启服务
+本文说明如何将 Linux 版 AutoLogin-CQU 配置为 systemd 服务。Linux 版程序从进程工作目录读取 `config.yaml`，因此 `WorkingDirectory` 必须指向同时包含 `AutoLogin-CQU` 和 `config.yaml` 的目录。
 
 ## 前置条件
 
-- 已获取 `AutoLogin-CQU` 可执行程序（Linux 版本）
-- 拥有 sudo 权限
-- **已正确配置 `config.ini` 文件**
+- 已获取 Linux 版 `AutoLogin-CQU` 可执行文件。
+- 已编辑 `config.yaml`，并确认 `STUDENT_ID`、`USER_PASSWORD` 正确。
+- 系统已安装 libcurl 运行库。源码编译还需要 C++ 编译器和 libcurl 开发头文件。
+- 拥有 sudo 权限。
 
-## 创建 Systemd 服务文件
+Arch Linux 上 libcurl 由 `curl` 包提供；如缺失，请按发行版标准手动安装系统包。
 
-### 编辑服务文件模板
+## 推荐安装方式：专用低权限用户
 
-编辑 `autologin-cqu.service` 文件，替换以下占位符：
-
-| 占位符             | 说明          | 常见示例                                                                         |
-| --------------- | ----------- | ---------------------------------------------------------------------------- |
-| `<USERNAME>`    | 运行服务的用户名    | 你的用户名、root                                                                   |
-| `<PROGRAM_DIR>` | 程序所在目录的绝对路径 | `/home/用户名/AutoLogin-CQU_Linux_CPP`、`/usr/local/bin/AutoLogin-CQU_Linux_CPP` |
-
-**示例 1：以 root 用户运行（简化配置）**
-
-假设：
-- 用户名为 `root`
-- 程序路径为 `/usr/local/bin/AutoLogin-CQU_Linux_CPP`
-
-则服务文件应为：
-
-```ini
-[Unit]
-Description=CQU Campus Network Auto-Login Service
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=root
-WorkingDirectory=/usr/local/bin/AutoLogin-CQU_Linux_CPP
-ExecStart=/usr/local/bin/AutoLogin-CQU_Linux_CPP/AutoLogin-CQU
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=AutoLogin-CQU
-
-[Install]
-WantedBy=multi-user.target
-```
-
-**示例 2：以普通用户运行**
-
-假设：
-- 用户名为 `abc`
-- 程序路径为 `/home/abc/AutoLogin-CQU_Linux_CPP`
-
-则服务文件应为：
-
-```ini
-[Unit]
-Description=CQU Campus Network Auto-Login Service
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=abc
-WorkingDirectory=/home/abc/AutoLogin-CQU_Linux_CPP
-ExecStart=/home/abc/AutoLogin-CQU_Linux_CPP/AutoLogin-CQU
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=AutoLogin-CQU
-
-[Install]
-WantedBy=multi-user.target
-```
-
-### 将服务文件复制到系统目录
+推荐把程序放在 `/opt/autologin-cqu`，并使用专用系统用户运行。这样比 root 运行更稳妥，也避免 home 目录加密、网络挂载或未登录时不可用导致开机启动失败。
 
 ```bash
-sudo cp autologin-cqu.service /etc/systemd/system/
+sudo install -d -o root -g root -m 755 /opt/autologin-cqu
+sudo cp AutoLogin-CQU config.yaml /opt/autologin-cqu/
+sudo useradd --system --home-dir /opt/autologin-cqu --shell /usr/bin/nologin autologin-cqu
+sudo chown root:autologin-cqu /opt/autologin-cqu
+sudo chmod 750 /opt/autologin-cqu
+sudo chown root:root /opt/autologin-cqu/AutoLogin-CQU
+sudo chmod 755 /opt/autologin-cqu/AutoLogin-CQU
+sudo chown root:autologin-cqu /opt/autologin-cqu/config.yaml
+sudo chmod 640 /opt/autologin-cqu/config.yaml
+```
+
+如果发行版没有 `/usr/bin/nologin`，可用 `command -v nologin` 确认实际路径，再替换命令中的 shell 路径。
+
+## 编辑 service 文件
+
+编辑 `autologin-cqu.service`，替换以下占位符：
+
+| 占位符 | 说明 | 推荐值 |
+| --- | --- | --- |
+| `<USERNAME>` | 运行服务的用户 | `autologin-cqu` |
+| `<PROGRAM_DIR>` | 程序目录的绝对路径 | `/opt/autologin-cqu` |
+
+推荐配置如下：
+
+```ini
+[Unit]
+Description=CQU Campus Network Auto-Login Service
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=5min
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=autologin-cqu
+WorkingDirectory=/opt/autologin-cqu
+ExecStart=/opt/autologin-cqu/AutoLogin-CQU
+
+Restart=on-failure
+RestartSec=30s
+RestartPreventExitStatus=78
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=AutoLogin-CQU
+
+[Install]
+WantedBy=multi-user.target
+```
+
+说明：
+
+- `WorkingDirectory` 必须是 `config.yaml` 所在目录，否则程序无法读取配置。
+- `RestartPreventExitStatus=78` 用于配置错误时停止反复重启；缺少配置或账号密码为空会直接失败并保留日志。
+- `ProtectSystem=full` 会保护系统目录不被服务写入，但不影响读取 `/opt/autologin-cqu/config.yaml` 或发起网络请求。
+- 如确认程序不放在 `/home` 下，可额外添加 `ProtectHome=true` 强化隔离。
+
+## 安装 service
+
+从包含 `autologin-cqu.service` 的目录执行：
+
+```bash
+sudo cp autologin-cqu.service /etc/systemd/system/autologin-cqu.service
 sudo chmod 644 /etc/systemd/system/autologin-cqu.service
 ```
 
-### 重新加载 systemd 配置
+安装前建议检查占位符是否已经替换：
+
+```bash
+if grep -q '<.*>' /etc/systemd/system/autologin-cqu.service; then
+  echo 'service 文件仍有未替换的占位符'
+fi
+```
+
+验证 unit 语法和基础路径：
+
+```bash
+sudo systemd-analyze verify /etc/systemd/system/autologin-cqu.service
+sudo -u autologin-cqu test -r /opt/autologin-cqu/config.yaml
+sudo -u autologin-cqu test -x /opt/autologin-cqu/AutoLogin-CQU
+```
+
+重新加载 systemd：
 
 ```bash
 sudo systemctl daemon-reload
 ```
 
-## 配置文件权限（普通用户）
-
-为确保 systemd 服务能正确读取配置文件，请设置合适的权限：
-
-```bash
-# 假设程序目录为 /home/abc/AutoLogin-CQU_Linux_CPP
-cd /home/abc/AutoLogin-CQU_Linux_CPP
-
-# 配置文件权限（只有所有者可读）
-chmod 600 config.ini
-
-# 程序文件权限（可执行）
-chmod 755 AutoLogin-CQU
-```
-
-## 启动和管理服务
-
-### 启动服务
+## 启动和管理
 
 ```bash
 sudo systemctl start autologin-cqu
-```
-
-### 查看服务状态
-
-```bash
-sudo systemctl status autologin-cqu
-```
-
-### 启用开机自启
-
-```bash
+sudo systemctl status autologin-cqu --no-pager
 sudo systemctl enable autologin-cqu
 ```
 
-### 查看实时日志
+查看日志：
 
 ```bash
+sudo journalctl -u autologin-cqu -n 100 --no-pager
 sudo journalctl -u autologin-cqu -f
 ```
 
-### 停止服务
+停止或禁用：
 
 ```bash
 sudo systemctl stop autologin-cqu
+sudo systemctl disable autologin-cqu
 ```
 
-### 禁用开机自启
+修改 `config.yaml` 后只需要重启服务：
 
 ```bash
-sudo systemctl disable autologin-cqu
+sudo systemctl restart autologin-cqu
+```
+
+修改 `.service` 文件后需要重新加载 unit，再重启服务：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart autologin-cqu
+```
+
+## home 目录安装
+
+如果确实要把程序放在普通用户 home 目录，例如 `/home/abc/AutoLogin-CQU_Linux_CPP`，service 可设置为：
+
+```ini
+User=abc
+WorkingDirectory=/home/abc/AutoLogin-CQU_Linux_CPP
+ExecStart=/home/abc/AutoLogin-CQU_Linux_CPP/AutoLogin-CQU
+```
+
+同时确保该用户能遍历目录并读取配置：
+
+```bash
+sudo chown abc:abc /home/abc/AutoLogin-CQU_Linux_CPP/config.yaml
+sudo chmod 600 /home/abc/AutoLogin-CQU_Linux_CPP/config.yaml
+sudo chmod 755 /home/abc/AutoLogin-CQU_Linux_CPP/AutoLogin-CQU
+sudo -u abc test -r /home/abc/AutoLogin-CQU_Linux_CPP/config.yaml
+sudo -u abc test -x /home/abc/AutoLogin-CQU_Linux_CPP/AutoLogin-CQU
+```
+
+不建议在加密 home、网络挂载 home 或必须登录后才可访问的目录中配置开机自启服务。
+
+## root 运行
+
+root 运行通常没有必要。程序只需要读取配置文件并发起出站 HTTPS 请求，不需要特权端口、网卡配置或额外 capability。只有在临时排查权限问题时才建议短时间改为 `User=root` 验证。
+
+## 网络启动顺序
+
+service 使用：
+
+```ini
+After=network-online.target
+Wants=network-online.target
+```
+
+这只表示等待 systemd 认为网络 online。是否真的等待到地址/DNS 可用，取决于系统是否启用了对应的 wait-online 服务。
+
+常见检查命令：
+
+```bash
+systemctl is-enabled NetworkManager-wait-online.service
+systemctl is-enabled systemd-networkd-wait-online.service
+```
+
+如果使用 NetworkManager，可按需启用：
+
+```bash
+sudo systemctl enable --now NetworkManager-wait-online.service
+```
+
+如果使用 systemd-networkd，可按需启用：
+
+```bash
+sudo systemctl enable --now systemd-networkd-wait-online.service
+```
+
+即使启动早于校园网门户可用，程序也会按 `CHECK_INTERVAL` 周期重试。启动初期偶发 `failed to resolve host` 或 `failed to get local IPv4 address` 不一定代表 service 配置错误。
+
+## 配置项说明
+
+`config.yaml` 必须与 `AutoLogin-CQU` 位于同一工作目录。
+
+- `STUDENT_ID`：学号。
+- `USER_PASSWORD`：校园网密码。
+- `SERVER_IP`：认证服务器 IP。填写后跳过 `login.cqu.edu.cn` 的 DNS 解析，但请求仍发送 `Host: login.cqu.edu.cn`。
+- `LOGIN_IP`：提交给认证服务器的客户端 IPv4。路由器/NAT 代登录场景可能需要；普通主机通常留空。
+- `CHECK_INTERVAL`：检查间隔，必须为正整数秒；非法值会回退默认值。
+- `TIMEOUT`：libcurl 请求超时，必须为正整数秒；非法值会回退默认值。该值不保证限制系统 DNS 解析耗时。
+
+DNS 排查：
+
+```bash
+getent hosts login.cqu.edu.cn
+nslookup login.cqu.edu.cn
+# 如系统安装了 bind/dnsutils，也可使用 dig
+dig login.cqu.edu.cn
 ```
 
 ## 故障排查
 
-### 问题 1：服务无法启动
-
-**检查方案：**
+### 服务无法启动
 
 ```bash
-# 查看详细错误信息
-sudo systemctl status autologin-cqu
-sudo journalctl -u autologin-cqu -n 50
-
-# 检查文件路径是否正确
-ls -la /home/abc/AutoLogin-CQU_Linux_CPP
+sudo systemctl status autologin-cqu --no-pager
+sudo journalctl -u autologin-cqu -n 100 --no-pager
+sudo systemd-analyze verify /etc/systemd/system/autologin-cqu.service
 ```
 
-### 问题 2：提示找不到 config.ini
+重点检查：
 
-**解决方案：**
+- `/etc/systemd/system/autologin-cqu.service` 中是否还有 `<USERNAME>` 或 `<PROGRAM_DIR>`。
+- `WorkingDirectory` 是否为绝对路径，并指向 `config.yaml` 所在目录。
+- `AutoLogin-CQU` 是否存在且可执行。
+- 运行服务的用户是否能读取 `config.yaml`。
 
-- 确保 `config.ini` 与 `AutoLogin-CQU` 在同一目录
-- 在服务文件中设置正确的 `WorkingDirectory`
+### 配置错误后不自动重启
+
+这是预期行为。缺少 `config.yaml`、缺少账号或密码时，程序会返回退出码 `78`，service 通过 `RestartPreventExitStatus=78` 停止反复重启。修复配置后执行：
 
 ```bash
-pwd  # 确认当前目录
-ls -la config.ini AutoLogin-CQU
+sudo systemctl restart autologin-cqu
 ```
 
-### 问题 3：权限不足
-
-**解决方案：**
+### 权限不足
 
 ```bash
-# 检查文件权限
-ls -la /home/abc/AutoLogin-CQU_Linux_CPP
-stat config.ini
-
-# 修复权限
-chmod 600 config.ini
-chmod 755 AutoLogin-CQU
+sudo namei -l /opt/autologin-cqu/config.yaml
+sudo -u autologin-cqu test -r /opt/autologin-cqu/config.yaml
+sudo -u autologin-cqu test -x /opt/autologin-cqu/AutoLogin-CQU
 ```
 
-### 问题 4：登录失败
+如果使用 home 目录安装，把命令中的用户和路径替换为实际值。
 
-**检查方案：**
+### 缺少 libcurl
+
+如果日志或 `systemctl status` 显示动态库加载失败，检查二进制依赖：
 
 ```bash
-# 查看详细日志
-sudo journalctl -u autologin-cqu -n 100
-
-# 检查网络连接
-ping login.cqu.edu.cn
-nslookup login.cqu.edu.cn
-
-# 尝试手动运行程序
-cd /home/abc/AutoLogin-CQU_Linux_CPP
-./AutoLogin-CQU
+ldd /opt/autologin-cqu/AutoLogin-CQU
 ```
 
-## 常见问题 FAQ
+缺少系统库时，请按发行版标准安装 libcurl 运行库。Arch Linux 上由 `curl` 包提供。
 
-**Q: `WorkingDirectory` 和 `ExecStart` 的区别是什么？**  
-A: 
-- `ExecStart` 是执行的程序文件路径
-- `WorkingDirectory` 是程序运行时的工作目录，config.ini 必须在此目录下
-- 两个路径通常相同
+### 登录失败
 
-**Q: 服务修改后需要重新启动吗？**  
-A: 修改 `.service` 文件后，需要运行 `sudo systemctl daemon-reload`，然后 `sudo systemctl restart autologin-cqu`
+```bash
+sudo journalctl -u autologin-cqu -n 100 --no-pager
+getent hosts login.cqu.edu.cn
+cd /opt/autologin-cqu
+sudo -u autologin-cqu ./AutoLogin-CQU
+```
 
-**Q: 如何检查自启是否生效？**  
-A: 查看输出：`sudo systemctl is-enabled autologin-cqu`，应显示 `enabled`
+日志中的 `ip=...` 是程序选择并提交给门户的本机 IPv4。多网卡、VPN、容器或路由器/NAT 环境下，如果该地址不是预期地址，可考虑在 `config.yaml` 中设置 `LOGIN_IP`。
 
-**Q: 日志在哪里？**  
-A: 系统日志存储在 `/var/log/journal/`，用 `journalctl` 命令查看。使用 `SyslogIdentifier=AutoLogin-CQU` 可在日志中快速识别该服务的输出
+## 日志与隐私
 
----
+service 输出进入 systemd journal。日志可能包含本机 IP 和门户返回片段；不要在公共渠道直接粘贴完整日志。`config.yaml` 包含账号和密码，应保持最小可读权限。
 
-配置完成后，AutoLogin-CQU 将在系统启动时自动运行，并在后台持续保证网络连接
+## 卸载
+
+```bash
+sudo systemctl disable --now autologin-cqu
+sudo rm -f /etc/systemd/system/autologin-cqu.service
+sudo systemctl daemon-reload
+sudo systemctl reset-failed autologin-cqu
+```
+
+如果使用推荐的专用用户和 `/opt/autologin-cqu`，确认不再需要配置后再删除：
+
+```bash
+sudo rm -rf /opt/autologin-cqu
+sudo userdel autologin-cqu
+```

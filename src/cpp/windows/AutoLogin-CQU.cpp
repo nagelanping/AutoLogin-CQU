@@ -11,6 +11,14 @@
 #include <sstream>
 #include <iomanip>
 #include <memory>
+#include <fstream>
+#include <map>
+#include <atomic>
+#include <algorithm>
+#include <limits>
+#include <cstring>
+#include <cctype>
+#include <cstdlib>
 
 // 编译指令: g++ AutoLogin-CQU.cpp -o AutoLogin-CQU.exe -lwinhttp -liphlpapi -lws2_32 -lshell32 -luser32 -static
 
@@ -18,68 +26,177 @@ using namespace std;
 
 // ================= 配置常量 =================
 const wstring LOGIN_HOST = L"login.cqu.edu.cn";
+const string LOGIN_HOST_UTF8 = "login.cqu.edu.cn";
 const int LOGIN_PORT = 802;
 const wstring LOGIN_PATH_BASE = L"/eportal/portal/login";
+const DWORD DEFAULT_CHECK_INTERVAL_SECONDS = 20;
+const DWORD DEFAULT_TIMEOUT_SECONDS = 5;
+const DWORD MAX_CHECK_INTERVAL_SECONDS = 86400;
+const DWORD MAX_TIMEOUT_SECONDS = 300;
+const size_t MAX_RESPONSE_BYTES = 4096;
+const int CONFIG_ERROR_EXIT_CODE = 78;
 
 // ================= 全局配置变量 =================
 string USER_ACCOUNT;
 string USER_PASSWORD;
 string SERVER_IP; // 可选：直接指定服务器 IP，绕过 DNS 解析
-DWORD CHECK_INTERVAL_MS = 20000;
-DWORD TIMEOUT_MS = 5000;
+string LOGIN_IP;  // 可选：指定用于认证的客户端 IPv4，适用于路由器接入场景
+DWORD CHECK_INTERVAL_MS = DEFAULT_CHECK_INTERVAL_SECONDS * 1000;
+DWORD TIMEOUT_MS = DEFAULT_TIMEOUT_SECONDS * 1000;
 
-void LoadConfig()
+string Trim(const string &str)
+{
+    size_t first = str.find_first_not_of(" \t\r\n");
+    if (first == string::npos)
+        return "";
+    size_t last = str.find_last_not_of(" \t\r\n");
+    return str.substr(first, last - first + 1);
+}
+
+string StripInlineComment(const string &value)
+{
+    bool inSingleQuote = false;
+    bool inDoubleQuote = false;
+
+    for (size_t i = 0; i < value.size(); ++i)
+    {
+        char c = value[i];
+        if (c == '\'' && !inDoubleQuote)
+            inSingleQuote = !inSingleQuote;
+        else if (c == '"' && !inSingleQuote)
+            inDoubleQuote = !inDoubleQuote;
+        else if (c == '#' && !inSingleQuote && !inDoubleQuote)
+            return value.substr(0, i);
+    }
+
+    return value;
+}
+
+string UnquoteYamlValue(const string &value)
+{
+    string result = Trim(StripInlineComment(value));
+    if (result.size() >= 2)
+    {
+        char first = result.front();
+        char last = result.back();
+        if ((first == '"' && last == '"') || (first == '\'' && last == '\''))
+            return result.substr(1, result.size() - 2);
+    }
+    return result;
+}
+
+bool LoadYamlConfig(const string &filename, map<string, string> &config)
+{
+    ifstream file(filename);
+    if (!file.is_open())
+        return false;
+
+    string line;
+    while (getline(file, line))
+    {
+        string trimmed = Trim(line);
+        if (trimmed.empty() || trimmed[0] == '#')
+            continue;
+
+        size_t delimiter = trimmed.find(':');
+        if (delimiter == string::npos)
+            continue;
+
+        string key = Trim(trimmed.substr(0, delimiter));
+        string value = UnquoteYamlValue(trimmed.substr(delimiter + 1));
+        if (!key.empty())
+            config[key] = value;
+    }
+
+    return true;
+}
+
+DWORD GetConfigSeconds(const map<string, string> &config, const string &key, DWORD defaultValue, DWORD maxValue)
+{
+    map<string, string>::const_iterator it = config.find(key);
+    if (it == config.end() || it->second.empty())
+        return defaultValue;
+
+    try
+    {
+        if (!all_of(it->second.begin(), it->second.end(), [](unsigned char c) { return isdigit(c); }))
+            return defaultValue;
+
+        unsigned long value = stoul(it->second, NULL, 10);
+        if (value == 0)
+            return defaultValue;
+        return (DWORD)min<unsigned long>(value, maxValue);
+    }
+    catch (...)
+    {
+        return defaultValue;
+    }
+}
+
+bool IsPlaceholderCredential(const string &value)
+{
+    return value == "xxxxxxxx" || value == "xxxxxx";
+}
+
+DWORD SecondsToMilliseconds(DWORD seconds)
+{
+    DWORD maxSeconds = numeric_limits<DWORD>::max() / 1000;
+    return min(seconds, maxSeconds) * 1000;
+}
+
+bool LoadConfig()
 {
     char exePath[MAX_PATH];
-    if (GetModuleFileNameA(NULL, exePath, MAX_PATH) == 0)
+    DWORD pathLength = GetModuleFileNameA(NULL, exePath, MAX_PATH);
+    if (pathLength == 0 || pathLength == MAX_PATH)
     {
         cerr << "[错误] 无法获取可执行文件路径" << endl;
-        return;
+        return false;
     }
     string path(exePath);
-    string iniPath = path.substr(0, path.find_last_of("\\/") + 1) + "config.ini";
+    string configPath = path.substr(0, path.find_last_of("\\/") + 1) + "config.yaml";
 
-    char buffer[256];
-
-    GetPrivateProfileStringA("Settings", "STUDENT_ID", "", buffer, 256, iniPath.c_str());
-    if (strlen(buffer) > 0)
-        USER_ACCOUNT = string(",0,") + buffer;
-    else
-        USER_ACCOUNT = "";
-
-    GetPrivateProfileStringA("Settings", "USER_PASSWORD", "", buffer, 256, iniPath.c_str());
-    USER_PASSWORD = buffer;
-
-    GetPrivateProfileStringA("Settings", "SERVER_IP", "", buffer, 256, iniPath.c_str());
-    SERVER_IP = buffer;
-
-    int interval = GetPrivateProfileIntA("Settings", "CHECK_INTERVAL", 20, iniPath.c_str());
-    if (interval > 0)
-        CHECK_INTERVAL_MS = interval * 1000;
-
-    int timeout = GetPrivateProfileIntA("Settings", "TIMEOUT", 5, iniPath.c_str());
-    if (timeout > 0)
-        TIMEOUT_MS = timeout * 1000;
-
-    if (USER_ACCOUNT.empty() || USER_PASSWORD.empty())
+    map<string, string> config;
+    if (!LoadYamlConfig(configPath, config))
     {
-        cerr << "[警告] 未在 config.ini 中找到账号或密码，请检查配置文件。" << endl;
-        cerr << "配置文件路径: " << iniPath << endl;
+        cerr << "[错误] 无法读取 config.yaml，请检查配置文件。" << endl;
+        cerr << "配置文件路径: " << configPath << endl;
+        return false;
     }
-    else
+
+    string studentId = config["STUDENT_ID"];
+    USER_PASSWORD = config["USER_PASSWORD"];
+    SERVER_IP = config["SERVER_IP"];
+    LOGIN_IP = config["LOGIN_IP"];
+
+    if (studentId.empty() || USER_PASSWORD.empty() ||
+        IsPlaceholderCredential(studentId) || IsPlaceholderCredential(USER_PASSWORD))
     {
-        cout << "[信息] 已加载配置文件: " << iniPath << endl;
+        cerr << "[错误] 未配置有效账号或密码，请更新 config.yaml。" << endl;
+        cerr << "配置文件路径: " << configPath << endl;
+        return false;
     }
+
+    USER_ACCOUNT = string(",0,") + studentId;
+    CHECK_INTERVAL_MS = SecondsToMilliseconds(GetConfigSeconds(config, "CHECK_INTERVAL", DEFAULT_CHECK_INTERVAL_SECONDS, MAX_CHECK_INTERVAL_SECONDS));
+    TIMEOUT_MS = SecondsToMilliseconds(GetConfigSeconds(config, "TIMEOUT", DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS));
+
+    cout << "[信息] 已加载配置文件: " << configPath << endl;
+    return true;
 }
 
 // ================= 全局控制 =================
 HANDLE g_hExitEvent = NULL;
-HANDLE g_hPauseEvent = NULL; // 暂停事件
-bool g_bPaused = false;      // 暂停状态
-bool g_bMinimized = false;   // 最小化状态
+HANDLE g_hPauseEvent = NULL;       // 暂停事件
+HANDLE g_hMessageReadyEvent = NULL;
+atomic<DWORD> g_dwMessageThreadId(0);
+atomic_bool g_bPaused(false);       // 暂停状态
+atomic_bool g_bHiddenToTray(false); // 已隐藏到托盘
+atomic_bool g_bTraySupported(false);
 
 // 系统托盘相关
 #define WM_TRAYICON (WM_USER + 1)
+#define WM_APP_EXIT (WM_APP + 1)
 #define ID_TRAY_SHOW 1001
 #define ID_TRAY_PAUSE 1002
 #define ID_TRAY_EXIT 1003
@@ -109,51 +226,76 @@ BOOL WINAPI ConsoleHandler(DWORD signal)
 
 // ================= 系统托盘功能 =================
 
+bool IsWindowsTerminalSession()
+{
+    return GetEnvironmentVariableW(L"WT_SESSION", NULL, 0) > 0;
+}
+
+bool HasClassicConsoleTraySupport()
+{
+    return g_bTraySupported.load() && g_hConsole && IsWindow(g_hConsole);
+}
+
 // 显示控制台窗口
 void ShowConsoleWindow()
 {
-    if (g_hConsole)
-    {
-        ShowWindow(g_hConsole, SW_RESTORE);
-        SetForegroundWindow(g_hConsole);
-        g_bMinimized = false;
-    }
+    if (!HasClassicConsoleTraySupport())
+        return;
+
+    ShowWindow(g_hConsole, SW_RESTORE);
+    SetForegroundWindow(g_hConsole);
+    g_bHiddenToTray.store(false);
 }
 
 // 隐藏控制台窗口到托盘
 void HideToTray()
 {
-    if (g_hConsole)
-    {
-        ShowWindow(g_hConsole, SW_HIDE);
-        g_bMinimized = true;
-    }
+    if (!HasClassicConsoleTraySupport())
+        return;
+
+    ShowWindow(g_hConsole, SW_HIDE);
+    g_bHiddenToTray.store(true);
+}
+
+void UpdateTrayTooltip(bool isPaused)
+{
+    if (!g_hWnd)
+        return;
+
+    NOTIFYICONDATAW nid = {0};
+    nid.cbSize = sizeof(NOTIFYICONDATAW);
+    nid.hWnd = g_hWnd;
+    nid.uID = 1;
+    nid.uFlags = NIF_TIP;
+    wcscpy_s(nid.szTip, isPaused ? L"CQU 自动登录 - 已暂停" : L"CQU 自动登录 - 运行中");
+    Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
 // 切换暂停状态
 void TogglePause()
 {
-    g_bPaused = !g_bPaused;
-    if (g_bPaused)
+    bool wasPaused = g_bPaused.load();
+    while (!g_bPaused.compare_exchange_weak(wasPaused, !wasPaused))
+    {
+    }
+
+    bool isPaused = !wasPaused;
+    if (isPaused)
     {
         cout << "[信息] 服务已暂停，按 Ctrl+P 继续" << endl;
     }
     else
     {
         cout << "[信息] 服务已继续" << endl;
-        SetEvent(g_hPauseEvent); // 唤醒主循环
+        if (g_hPauseEvent)
+            SetEvent(g_hPauseEvent);
     }
 
-    // 更新托盘提示
-    if (g_bPaused)
-        wcscpy_s(g_nid.szTip, L"CQU 自动登录 - 已暂停");
-    else
-        wcscpy_s(g_nid.szTip, L"CQU 自动登录 - 运行中");
-    Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+    UpdateTrayTooltip(isPaused);
 }
 
 // 创建托盘图标
-void CreateTrayIcon(HWND hWnd)
+bool CreateTrayIcon(HWND hWnd)
 {
     g_nid.cbSize = sizeof(NOTIFYICONDATAW);
     g_nid.hWnd = hWnd;
@@ -162,7 +304,7 @@ void CreateTrayIcon(HWND hWnd)
     g_nid.uCallbackMessage = WM_TRAYICON;
     g_nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
     wcscpy_s(g_nid.szTip, L"CQU 自动登录 - 运行中");
-    Shell_NotifyIconW(NIM_ADD, &g_nid);
+    return Shell_NotifyIconW(NIM_ADD, &g_nid) == TRUE;
 }
 
 // 删除托盘图标
@@ -179,7 +321,7 @@ void ShowTrayMenu(HWND hWnd)
 
     HMENU hMenu = CreatePopupMenu();
     AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHOW, L"显示");
-    AppendMenuW(hMenu, MF_STRING, ID_TRAY_PAUSE, g_bPaused ? L"继续" : L"暂停");
+    AppendMenuW(hMenu, MF_STRING, ID_TRAY_PAUSE, g_bPaused.load() ? L"继续" : L"暂停");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"退出");
 
@@ -203,6 +345,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
             ShowTrayMenu(hWnd);
         }
         break;
+    case WM_APP_EXIT:
+        RemoveTrayIcon();
+        DestroyWindow(hWnd);
+        break;
     case WM_COMMAND:
         switch (LOWORD(wParam))
         {
@@ -218,6 +364,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
         }
         break;
     case WM_DESTROY:
+        g_hWnd = NULL;
         PostQuitMessage(0);
         break;
     default:
@@ -246,13 +393,8 @@ DWORD WINAPI ConsoleMonitorThread(LPVOID lpParam)
 {
     while (WaitForSingleObject(g_hExitEvent, 200) == WAIT_TIMEOUT)
     {
-        if (g_hConsole && !g_bMinimized)
-        {
-            if (IsIconic(g_hConsole)) // 窗口被最小化
-            {
-                HideToTray();
-            }
-        }
+        if (HasClassicConsoleTraySupport() && !g_bHiddenToTray.load() && IsIconic(g_hConsole))
+            HideToTray();
     }
     return 0;
 }
@@ -264,40 +406,37 @@ DWORD WINAPI KeyboardMonitorThread(LPVOID lpParam)
     if (hInput == INVALID_HANDLE_VALUE)
         return 1;
 
-    // 保存原始控制台模式
-    DWORD oldMode;
-    GetConsoleMode(hInput, &oldMode);
-    // 启用窗口输入和鼠标输入，禁用行输入模式以便读取单个按键
-    SetConsoleMode(hInput, ENABLE_WINDOW_INPUT | ENABLE_MOUSE_INPUT);
+    DWORD oldMode = 0;
+    if (!GetConsoleMode(hInput, &oldMode))
+        return 1;
+
+    DWORD newMode = oldMode | ENABLE_WINDOW_INPUT | ENABLE_PROCESSED_INPUT;
+    if (!SetConsoleMode(hInput, newMode))
+        return 1;
 
     INPUT_RECORD inputRecord;
     DWORD eventsRead;
 
     while (WaitForSingleObject(g_hExitEvent, 0) == WAIT_TIMEOUT)
     {
-        // 等待输入事件，带超时
         DWORD waitResult = WaitForSingleObject(hInput, 100);
-        if (waitResult == WAIT_OBJECT_0)
-        {
-            if (PeekConsoleInput(hInput, &inputRecord, 1, &eventsRead) && eventsRead > 0)
-            {
-                ReadConsoleInput(hInput, &inputRecord, 1, &eventsRead);
+        if (waitResult != WAIT_OBJECT_0)
+            continue;
 
-                if (inputRecord.EventType == KEY_EVENT &&
-                    inputRecord.Event.KeyEvent.bKeyDown)
-                {
-                    // 检测 Ctrl+P
-                    if ((inputRecord.Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) &&
-                        inputRecord.Event.KeyEvent.wVirtualKeyCode == 'P')
-                    {
-                        TogglePause();
-                    }
-                }
-            }
+        if (!PeekConsoleInput(hInput, &inputRecord, 1, &eventsRead) || eventsRead == 0)
+            continue;
+
+        if (!ReadConsoleInput(hInput, &inputRecord, 1, &eventsRead))
+            continue;
+
+        if (inputRecord.EventType == KEY_EVENT && inputRecord.Event.KeyEvent.bKeyDown &&
+            (inputRecord.Event.KeyEvent.dwControlKeyState & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) &&
+            inputRecord.Event.KeyEvent.wVirtualKeyCode == 'P')
+        {
+            TogglePause();
         }
     }
 
-    // 恢复控制台模式
     SetConsoleMode(hInput, oldMode);
     return 0;
 }
@@ -305,19 +444,30 @@ DWORD WINAPI KeyboardMonitorThread(LPVOID lpParam)
 // 消息循环线程（同时负责创建窗口和托盘图标）
 DWORD WINAPI MessageLoopThread(LPVOID lpParam)
 {
-    // 在此线程中创建消息窗口和托盘图标
+    g_dwMessageThreadId.store(GetCurrentThreadId());
+    MSG msg;
+    PeekMessage(&msg, NULL, WM_USER, WM_USER, PM_NOREMOVE);
+
     g_hWnd = CreateMessageWindow();
     if (g_hWnd)
     {
-        CreateTrayIcon(g_hWnd);
+        if (!CreateTrayIcon(g_hWnd))
+            cerr << "[警告] 无法创建托盘图标，托盘功能不可用。" << endl;
+    }
+    else
+    {
+        cerr << "[警告] 无法创建托盘消息窗口，托盘功能不可用。" << endl;
     }
 
-    MSG msg;
+    if (g_hMessageReadyEvent)
+        SetEvent(g_hMessageReadyEvent);
+
     while (GetMessage(&msg, NULL, 0, 0))
     {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
+    g_dwMessageThreadId.store(0);
     return 0;
 }
 
@@ -387,6 +537,22 @@ string ToString(const wstring &wstr)
     string strTo(size_needed, 0);
     WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), (int)wstr.size(), &strTo[0], size_needed, NULL, NULL);
     return strTo;
+}
+
+void CloseHandleIfValid(HANDLE &handle)
+{
+    if (handle)
+    {
+        CloseHandle(handle);
+        handle = NULL;
+    }
+}
+
+string TruncateForLog(const string &value, size_t maxLength = 200)
+{
+    if (value.length() <= maxLength)
+        return value;
+    return value.substr(0, maxLength) + "...";
 }
 
 // 获取本机 IP (IPv4 & IPv6)
@@ -473,6 +639,8 @@ bool GetLocalIPs(string &ipv4, string &ipv6)
 
 // ================= 核心逻辑 =================
 
+string g_cachedResolvedIP;
+
 // 解析主机名到 IP（优先 IPv4，回退 IPv6）
 bool ResolveHostToIP(const string &host, string &out_ip)
 {
@@ -519,6 +687,170 @@ bool ResolveHostToIP(const string &host, string &out_ip)
     return false;
 }
 
+wstring BuildLoginPath(const string &loginIpv4, const string &ipv6)
+{
+    stringstream ss;
+    ss << "callback=dr1004"
+       << "&login_method=1"
+       << "&user_account=" << UrlEncode(USER_ACCOUNT)
+       << "&user_password=" << UrlEncode(USER_PASSWORD)
+       << "&wlan_user_ip=" << UrlEncode(loginIpv4)
+       << "&wlan_user_ipv6=" << UrlEncode(ipv6)
+       << "&wlan_user_mac=000000000000"
+       << "&wlan_ac_ip=&wlan_ac_name="
+       << "&term_ua=" << UrlEncode("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+       << "&term_type=1&jsVersion=4.2.2&terminal_type=1&lang=zh-cn,zh&v=6231";
+
+    return LOGIN_PATH_BASE + L"?" + ToWString(ss.str());
+}
+
+bool GetPortalAddress(string &resolvedIP)
+{
+    if (!SERVER_IP.empty())
+    {
+        resolvedIP = SERVER_IP;
+        return true;
+    }
+
+    if (!g_cachedResolvedIP.empty())
+    {
+        resolvedIP = g_cachedResolvedIP;
+        return true;
+    }
+
+    if (!ResolveHostToIP(LOGIN_HOST_UTF8, g_cachedResolvedIP))
+    {
+        cerr << "[错误] 无法解析主机名到 IP: " << LOGIN_HOST_UTF8 << endl;
+        cerr << "[提示] 请在 config.yaml 中添加 SERVER_IP: xxx.xxx.xxx.xxx 手动指定服务器 IP" << endl;
+        cerr << "[提示] 可通过 nslookup login.cqu.edu.cn 查询正确的 IP 地址" << endl;
+        return false;
+    }
+
+    resolvedIP = g_cachedResolvedIP;
+    return true;
+}
+
+void ClearPortalAddressCache()
+{
+    if (SERVER_IP.empty())
+        g_cachedResolvedIP.clear();
+}
+
+bool ReadResponseBody(HINTERNET hRequest, string &response)
+{
+    response.clear();
+
+    while (response.size() < MAX_RESPONSE_BYTES)
+    {
+        DWORD available = 0;
+        if (!WinHttpQueryDataAvailable(hRequest, &available))
+        {
+            cerr << "[错误] 查询响应数据失败: " << GetLastError() << endl;
+            return false;
+        }
+        if (available == 0)
+            return true;
+
+        DWORD toRead = (DWORD)min<size_t>(available, MAX_RESPONSE_BYTES - response.size());
+        vector<char> buffer(toRead);
+        DWORD downloaded = 0;
+        if (!WinHttpReadData(hRequest, buffer.data(), toRead, &downloaded))
+        {
+            cerr << "[错误] 读取响应数据失败: " << GetLastError() << endl;
+            return false;
+        }
+        if (downloaded == 0)
+            return true;
+
+        response.append(buffer.data(), downloaded);
+    }
+
+    return true;
+}
+
+bool ContainsJsonIntField(const string &response, const string &key, int expected)
+{
+    string token = "\"" + key + "\"";
+    size_t pos = 0;
+
+    while ((pos = response.find(token, pos)) != string::npos)
+    {
+        pos += token.size();
+        while (pos < response.size() && isspace((unsigned char)response[pos]))
+            ++pos;
+        if (pos >= response.size() || response[pos] != ':')
+            continue;
+        ++pos;
+        while (pos < response.size() && isspace((unsigned char)response[pos]))
+            ++pos;
+
+        bool quoted = pos < response.size() && response[pos] == '"';
+        if (quoted)
+            ++pos;
+
+        size_t valueStart = pos;
+        if (pos < response.size() && response[pos] == '-')
+            ++pos;
+        while (pos < response.size() && isdigit((unsigned char)response[pos]))
+            ++pos;
+        if (valueStart == pos)
+            continue;
+
+        try
+        {
+            int value = stoi(response.substr(valueStart, pos - valueStart));
+            if (quoted && (pos >= response.size() || response[pos] != '"'))
+                continue;
+            if (value == expected)
+                return true;
+        }
+        catch (...)
+        {
+        }
+    }
+
+    return false;
+}
+
+enum class LoginResult
+{
+    Success,
+    AlreadyOnline,
+    Failed
+};
+
+LoginResult ClassifyLoginResponse(const string &response)
+{
+    if (ContainsJsonIntField(response, "result", 1))
+        return LoginResult::Success;
+
+    bool alreadyOnline = ContainsJsonIntField(response, "ret_code", 2);
+    bool welcomeOnline = ContainsJsonIntField(response, "result", 0) &&
+                         ContainsJsonIntField(response, "ret_code", 1) &&
+                         response.find("Welcome to Drcom System") != string::npos;
+
+    return (alreadyOnline || welcomeOnline) ? LoginResult::AlreadyOnline : LoginResult::Failed;
+}
+
+void LogLoginResult(LoginResult result, const string &loginIpv4, const string &response)
+{
+    switch (result)
+    {
+    case LoginResult::Success:
+        cout << "[成功] 登录成功 (IPv4: " << loginIpv4 << ")" << endl;
+        break;
+    case LoginResult::AlreadyOnline:
+        cout << "[成功] 设备已在线 (IPv4: " << loginIpv4 << ")" << endl;
+        break;
+    case LoginResult::Failed:
+        cout << "[失败] 登录失败 (IPv4: " << loginIpv4 << ")" << endl;
+        break;
+    }
+
+    if (!response.empty())
+        cout << "[响应] " << TruncateForLog(response) << endl;
+}
+
 void PerformLogin(HINTERNET hSession)
 {
     string ipv4, ipv6;
@@ -528,218 +860,220 @@ void PerformLogin(HINTERNET hSession)
         return;
     }
 
-    // 构建 URL 参数
-    stringstream ss;
-    ss << "callback=dr1004"
-       << "&login_method=1"
-       << "&user_account=" << UrlEncode(USER_ACCOUNT)
-       << "&user_password=" << UrlEncode(USER_PASSWORD)
-       << "&wlan_user_ip=" << UrlEncode(ipv4)
-       << "&wlan_user_ipv6=" << UrlEncode(ipv6)
-       << "&wlan_user_mac=000000000000"
-       << "&wlan_ac_ip=&wlan_ac_name="
-       << "&term_ua=" << UrlEncode("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-       << "&term_type=1&jsVersion=4.2.2&terminal_type=1&lang=zh-cn,zh&v=6231";
+    string loginIpv4 = LOGIN_IP.empty() ? ipv4 : LOGIN_IP;
+    if (!LOGIN_IP.empty())
+        cout << "[信息] 使用配置的登录 IP: " << loginIpv4 << endl;
 
-    wstring fullPath = LOGIN_PATH_BASE + L"?" + ToWString(ss.str());
-
-    // 确定目标服务器 IP：优先使用配置文件中的 SERVER_IP，否则尝试 DNS 解析
     string resolvedIP;
-    if (!SERVER_IP.empty())
-    {
-        resolvedIP = SERVER_IP;
-        cout << "[信息] 使用配置的服务器 IP: " << resolvedIP << endl;
-    }
-    else if (!ResolveHostToIP(ToString(LOGIN_HOST), resolvedIP))
-    {
-        cerr << "[错误] 无法解析主机名到 IP: " << ToString(LOGIN_HOST) << endl;
-        cerr << "[提示] 请在 config.ini 中添加 SERVER_IP=xxx.xxx.xxx.xxx 手动指定服务器 IP" << endl;
-        cerr << "[提示] 可通过 nslookup login.cqu.edu.cn 查询正确的 IP 地址" << endl;
+    if (!GetPortalAddress(resolvedIP))
         return;
-    }
+    if (!SERVER_IP.empty())
+        cout << "[信息] 使用配置的服务器 IP: " << resolvedIP << endl;
 
-    // 使用解析到的 IP 建立连接（每次重建，确保解析是最新的）
-    wstring wsIp = ToWString(resolvedIP);
-    ScopedWinHttp hConnect(WinHttpConnect(hSession, wsIp.c_str(), LOGIN_PORT, 0));
+    ScopedWinHttp hConnect(WinHttpConnect(hSession, ToWString(resolvedIP).c_str(), LOGIN_PORT, 0));
     if (!hConnect)
     {
         cerr << "[错误] WinHttpConnect 失败 (IP: " << resolvedIP << "): " << GetLastError() << endl;
+        ClearPortalAddressCache();
         return;
     }
 
-    // 创建请求（HTTPS）
+    wstring fullPath = BuildLoginPath(loginIpv4, ipv6);
     ScopedWinHttp hRequest(WinHttpOpenRequest(hConnect.get(), L"GET", fullPath.c_str(),
                                               NULL, WINHTTP_NO_REFERER,
                                               WINHTTP_DEFAULT_ACCEPT_TYPES,
                                               WINHTTP_FLAG_SECURE));
-
     if (!hRequest)
     {
         cerr << "[错误] 创建请求失败: " << GetLastError() << endl;
         return;
     }
 
-    // 忽略 SSL 证书错误 (常见于校园网自签名证书)
-    DWORD dwFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
-                    SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
-                    SECURITY_FLAG_IGNORE_CERT_DATE_INVALID;
-    WinHttpSetOption(hRequest.get(), WINHTTP_OPTION_SECURITY_FLAGS, &dwFlags, sizeof(dwFlags));
-
-    // 添加 Host 头以便服务器识别虚拟主机（使用原始主机名）
-    wstring hostHeader = L"Host: " + LOGIN_HOST;
-    WinHttpAddRequestHeaders(hRequest.get(), hostHeader.c_str(), (ULONG)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
-
-    // 发送请求
-    if (WinHttpSendRequest(hRequest.get(), WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0))
+    DWORD securityFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
+                          SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
+                          SECURITY_FLAG_IGNORE_CERT_DATE_INVALID;
+    if (!WinHttpSetOption(hRequest.get(), WINHTTP_OPTION_SECURITY_FLAGS, &securityFlags, sizeof(securityFlags)))
     {
-        if (WinHttpReceiveResponse(hRequest.get(), NULL))
-        {
-            DWORD statusCode = 0;
-            DWORD dwSize = sizeof(statusCode);
-            WinHttpQueryHeaders(hRequest.get(), WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                                WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &dwSize, WINHTTP_NO_HEADER_INDEX);
-
-            if (statusCode == 200)
-            {
-                // 读取响应内容以确认登录结果
-                string response;
-                DWORD dwSize = 0;
-                DWORD dwDownloaded = 0;
-                do
-                {
-                    dwSize = 0;
-                    if (!WinHttpQueryDataAvailable(hRequest.get(), &dwSize))
-                        break;
-                    if (dwSize == 0)
-                        break;
-
-                    vector<char> buffer(dwSize + 1);
-                    if (WinHttpReadData(hRequest.get(), &buffer[0], dwSize, &dwDownloaded))
-                    {
-                        response.append(buffer.data(), dwDownloaded);
-                    }
-                } while (dwSize > 0);
-
-                // 解析简单的 JSON 响应
-                // 成功: "result":1
-                // 已在线: "ret_code":2
-                bool isSuccess = (response.find("\"result\":1") != string::npos);
-                bool isOnline = (response.find("\"ret_code\":2") != string::npos);
-
-                if (isSuccess || isOnline)
-                {
-                    cout << "[成功] " << (isOnline ? "设备已在线" : "登录成功") << " (IPv4: " << ipv4 << ")" << endl;
-                }
-                else
-                {
-                    cout << "[失败] 登录失败 (IPv4: " << ipv4 << ")" << endl;
-                }
-
-                if (!response.empty())
-                {
-                    // 简单的截断输出，防止过长
-                    if (response.length() > 200)
-                        response = response.substr(0, 200) + "...";
-                    cout << "[响应] " << response << endl;
-                }
-            }
-            else
-            {
-                cout << "[警告] 请求返回状态码: " << statusCode << endl;
-            }
-        }
-        else
-        {
-            cerr << "[错误] 接收响应失败: " << GetLastError() << endl;
-        }
+        cerr << "[错误] 设置 TLS 证书选项失败: " << GetLastError() << endl;
+        return;
     }
-    else
+
+    wstring hostHeader = L"Host: " + LOGIN_HOST;
+    if (!WinHttpAddRequestHeaders(hRequest.get(), hostHeader.c_str(), (ULONG)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE))
+    {
+        cerr << "[错误] 添加 Host 请求头失败: " << GetLastError() << endl;
+        return;
+    }
+    if (!WinHttpAddRequestHeaders(hRequest.get(), L"Connection: close", (ULONG)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE))
+        cerr << "[警告] 添加 Connection 请求头失败: " << GetLastError() << endl;
+
+    if (!WinHttpSendRequest(hRequest.get(), WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0))
     {
         cerr << "[错误] 发送请求失败: " << GetLastError() << endl;
+        ClearPortalAddressCache();
+        return;
     }
+
+    if (!WinHttpReceiveResponse(hRequest.get(), NULL))
+    {
+        cerr << "[错误] 接收响应失败: " << GetLastError() << endl;
+        return;
+    }
+
+    DWORD statusCode = 0;
+    DWORD statusSize = sizeof(statusCode);
+    if (!WinHttpQueryHeaders(hRequest.get(), WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                             WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX))
+    {
+        cerr << "[错误] 查询状态码失败: " << GetLastError() << endl;
+        return;
+    }
+
+    if (statusCode != 200)
+    {
+        cout << "[警告] 请求返回状态码: " << statusCode << endl;
+        return;
+    }
+
+    string response;
+    if (!ReadResponseBody(hRequest.get(), response))
+        return;
+
+    LogLoginResult(ClassifyLoginResponse(response), loginIpv4, response);
 }
 
 int main()
 {
-    // 1. 初始化控制台和信号处理
     SetConsoleOutputCP(CP_UTF8);
 
-    // 加载配置文件
-    LoadConfig();
+    if (!LoadConfig())
+        return CONFIG_ERROR_EXIT_CODE;
+
+    int exitCode = 0;
+    bool wsaStarted = false;
+    WSADATA wsaData = {0};
+    HANDLE hConsoleMonitor = NULL;
+    HANDLE hKeyboardMonitor = NULL;
+    HANDLE hMessageLoop = NULL;
 
     g_hExitEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
-    g_hPauseEvent = CreateEvent(NULL, FALSE, FALSE, NULL); // 自动重置事件
+    g_hPauseEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+    g_hMessageReadyEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (!g_hExitEvent || !g_hPauseEvent || !g_hMessageReadyEvent)
+    {
+        cerr << "[错误] 创建事件失败: " << GetLastError() << endl;
+        exitCode = 1;
+        goto cleanup;
+    }
 
     if (!SetConsoleCtrlHandler(ConsoleHandler, TRUE))
     {
-        cerr << "无法设置控制台处理程序。" << endl;
-        return 1;
+        cerr << "[错误] 无法设置控制台处理程序: " << GetLastError() << endl;
+        exitCode = 1;
+        goto cleanup;
     }
 
-    // 获取控制台窗口句柄
-    g_hConsole = GetConsoleWindow();
-
-    // 启动监控线程（消息循环线程会创建托盘图标）
-    HANDLE hConsoleMonitor = CreateThread(NULL, 0, ConsoleMonitorThread, NULL, 0, NULL);
-    HANDLE hKeyboardMonitor = CreateThread(NULL, 0, KeyboardMonitorThread, NULL, 0, NULL);
-    HANDLE hMessageLoop = CreateThread(NULL, 0, MessageLoopThread, NULL, 0, NULL);
-
-    // 等待托盘图标创建完成
-    Sleep(100);
-
-    cout << "=== CQU 自动登录服务已启动 ===" << endl;
-    cout << "按 Ctrl+C 或关闭窗口可安全退出。" << endl;
-    cout << "按 Ctrl+P 暂停/继续服务。" << endl;
-    cout << "最小化窗口将隐藏到系统托盘。" << endl;
-
-    // 2. 初始化 WinHTTP 会话 (RAII)
-    // WINHTTP_ACCESS_TYPE_NO_PROXY: 强制绕过系统代理，直连
-    ScopedWinHttp hSession(WinHttpOpen(L"AutoLogin-CQU/1.0",
-                                       WINHTTP_ACCESS_TYPE_NO_PROXY,
-                                       WINHTTP_NO_PROXY_NAME,
-                                       WINHTTP_NO_PROXY_BYPASS, 0));
-    if (!hSession)
-    {
-        cerr << "WinHttpOpen 失败。" << endl;
-        return 1;
-    }
-
-    WinHttpSetTimeouts(hSession.get(), TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS);
-
-    // 初始化 Winsock，用于 getaddrinfo/inet_ntop 等函数（ResolveHostToIP 使用）
-    WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
     {
-        cerr << "WSAStartup 失败。" << endl;
-        return 1;
+        cerr << "[错误] WSAStartup 失败。" << endl;
+        exitCode = 1;
+        goto cleanup;
     }
+    wsaStarted = true;
 
-    // 4. 主循环
-
-    while (true)
     {
-        // 检查是否暂停
-        if (!g_bPaused)
+        ScopedWinHttp hSession(WinHttpOpen(L"AutoLogin-CQU/1.0",
+                                           WINHTTP_ACCESS_TYPE_NO_PROXY,
+                                           WINHTTP_NO_PROXY_NAME,
+                                           WINHTTP_NO_PROXY_BYPASS, 0));
+        if (!hSession)
         {
-            PerformLogin(hSession.get());
+            cerr << "[错误] WinHttpOpen 失败: " << GetLastError() << endl;
+            exitCode = 1;
+            goto cleanup;
         }
 
-        // 等待间隔，同时监听退出事件和暂停唤醒事件
-        HANDLE handles[] = {g_hExitEvent, g_hPauseEvent};
-        DWORD waitResult = WaitForMultipleObjects(2, handles, FALSE, CHECK_INTERVAL_MS);
+        if (!WinHttpSetTimeouts(hSession.get(), TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS))
+            cerr << "[警告] 设置 WinHTTP 超时失败: " << GetLastError() << endl;
 
-        if (waitResult == WAIT_OBJECT_0) // 退出事件
+        if (IsWindowsTerminalSession())
         {
-            cout << "\n正在退出..." << endl;
-            break;
+            g_hConsole = NULL;
+            g_bTraySupported.store(false);
+            cerr << "[警告] 检测到 Windows Terminal，当前版本不支持最小化到系统托盘。" << endl;
+            cerr << "[警告] 如需使用托盘功能，请从 cmd.exe 或传统控制台窗口启动。" << endl;
         }
-        // WAIT_OBJECT_0 + 1 表示暂停事件被触发（继续），继续下一轮循环
+        else
+        {
+            g_hConsole = GetConsoleWindow();
+            g_bTraySupported.store(g_hConsole && IsWindow(g_hConsole));
+            if (!g_bTraySupported.load())
+                cerr << "[警告] 未检测到可用的传统控制台窗口，托盘功能不可用。" << endl;
+        }
+
+        if (g_bTraySupported.load())
+        {
+            hConsoleMonitor = CreateThread(NULL, 0, ConsoleMonitorThread, NULL, 0, NULL);
+            if (!hConsoleMonitor)
+                cerr << "[警告] 控制台窗口监控线程启动失败: " << GetLastError() << endl;
+
+            hMessageLoop = CreateThread(NULL, 0, MessageLoopThread, NULL, 0, NULL);
+            if (!hMessageLoop)
+            {
+                cerr << "[警告] 托盘消息线程启动失败: " << GetLastError() << endl;
+            }
+            else if (WaitForSingleObject(g_hMessageReadyEvent, 1000) != WAIT_OBJECT_0)
+            {
+                cerr << "[警告] 托盘消息线程启动超时，核心登录服务将继续运行。" << endl;
+            }
+        }
+
+        hKeyboardMonitor = CreateThread(NULL, 0, KeyboardMonitorThread, NULL, 0, NULL);
+        if (!hKeyboardMonitor)
+            cerr << "[警告] 键盘监控线程启动失败: " << GetLastError() << endl;
+
+        cout << "=== CQU 自动登录服务已启动 ===" << endl;
+        cout << "按 Ctrl+C 或关闭窗口可安全退出。" << endl;
+        cout << "按 Ctrl+P 暂停/继续服务。" << endl;
+        if (g_bTraySupported.load())
+            cout << "最小化窗口将隐藏到系统托盘。" << endl;
+        else
+            cout << "当前环境不支持最小化到系统托盘；如需使用该功能，请从 cmd.exe 或传统控制台窗口启动。" << endl;
+
+        while (true)
+        {
+            if (!g_bPaused.load())
+                PerformLogin(hSession.get());
+
+            HANDLE handles[] = {g_hExitEvent, g_hPauseEvent};
+            DWORD waitResult = WaitForMultipleObjects(2, handles, FALSE, CHECK_INTERVAL_MS);
+            if (waitResult == WAIT_OBJECT_0)
+            {
+                cout << "\n正在退出..." << endl;
+                break;
+            }
+            if (waitResult == WAIT_FAILED)
+            {
+                cerr << "[错误] 等待事件失败: " << GetLastError() << endl;
+                exitCode = 1;
+                break;
+            }
+        }
     }
 
-    // 5. 资源清理
-    RemoveTrayIcon();
+cleanup:
+    if (g_hExitEvent)
+        SetEvent(g_hExitEvent);
 
-    // 等待线程结束
+    if (g_hWnd)
+        PostMessage(g_hWnd, WM_APP_EXIT, 0, 0);
+    else
+    {
+        DWORD messageThreadId = g_dwMessageThreadId.load();
+        if (messageThreadId)
+            PostThreadMessage(messageThreadId, WM_QUIT, 0, 0);
+    }
+
     if (hConsoleMonitor)
     {
         WaitForSingleObject(hConsoleMonitor, 500);
@@ -752,19 +1086,18 @@ int main()
     }
     if (hMessageLoop)
     {
-        PostMessage(g_hWnd, WM_QUIT, 0, 0);
-        WaitForSingleObject(hMessageLoop, 500);
+        WaitForSingleObject(hMessageLoop, 1000);
         CloseHandle(hMessageLoop);
     }
 
-    if (g_hWnd)
-        DestroyWindow(g_hWnd);
+    if (wsaStarted)
+        WSACleanup();
 
-    // ScopedWinHttp 析构函数会自动调用 WinHttpCloseHandle
-    // 操作系统会自动回收进程内存
-    WSACleanup();
-    CloseHandle(g_hPauseEvent);
-    CloseHandle(g_hExitEvent);
-    cout << "程序已安全结束。" << endl;
-    return 0;
+    CloseHandleIfValid(g_hMessageReadyEvent);
+    CloseHandleIfValid(g_hPauseEvent);
+    CloseHandleIfValid(g_hExitEvent);
+
+    if (exitCode == 0)
+        cout << "程序已安全结束。" << endl;
+    return exitCode;
 }

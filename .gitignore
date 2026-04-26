@@ -1,3 +1,6 @@
 .obsidian
 release
 *.code-workspace
+.claude
+CLAUDE.md
+AutoLogin-CQU
