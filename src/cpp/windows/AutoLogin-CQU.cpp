@@ -20,6 +20,14 @@
 #include <cctype>
 #include <cstdlib>
 
+#ifndef WINHTTP_OPTION_DISABLE_FEATURE
+#define WINHTTP_OPTION_DISABLE_FEATURE 63
+#endif
+
+#ifndef WINHTTP_DISABLE_KEEP_ALIVE
+#define WINHTTP_DISABLE_KEEP_ALIVE 0x00000008
+#endif
+
 // 编译指令: g++ AutoLogin-CQU.cpp -o AutoLogin-CQU.exe -lwinhttp -liphlpapi -lws2_32 -lshell32 -luser32 -static
 
 using namespace std;
@@ -639,8 +647,6 @@ bool GetLocalIPs(string &ipv4, string &ipv6)
 
 // ================= 核心逻辑 =================
 
-string g_cachedResolvedIP;
-
 // 解析主机名到 IP（优先 IPv4，回退 IPv6）
 bool ResolveHostToIP(const string &host, string &out_ip)
 {
@@ -712,13 +718,7 @@ bool GetPortalAddress(string &resolvedIP)
         return true;
     }
 
-    if (!g_cachedResolvedIP.empty())
-    {
-        resolvedIP = g_cachedResolvedIP;
-        return true;
-    }
-
-    if (!ResolveHostToIP(LOGIN_HOST_UTF8, g_cachedResolvedIP))
+    if (!ResolveHostToIP(LOGIN_HOST_UTF8, resolvedIP))
     {
         cerr << "[错误] 无法解析主机名到 IP: " << LOGIN_HOST_UTF8 << endl;
         cerr << "[提示] 请在 config.yaml 中添加 SERVER_IP: xxx.xxx.xxx.xxx 手动指定服务器 IP" << endl;
@@ -726,14 +726,7 @@ bool GetPortalAddress(string &resolvedIP)
         return false;
     }
 
-    resolvedIP = g_cachedResolvedIP;
     return true;
-}
-
-void ClearPortalAddressCache()
-{
-    if (SERVER_IP.empty())
-        g_cachedResolvedIP.clear();
 }
 
 bool ReadResponseBody(HINTERNET hRequest, string &response)
@@ -874,7 +867,6 @@ void PerformLogin(HINTERNET hSession)
     if (!hConnect)
     {
         cerr << "[错误] WinHttpConnect 失败 (IP: " << resolvedIP << "): " << GetLastError() << endl;
-        ClearPortalAddressCache();
         return;
     }
 
@@ -898,6 +890,10 @@ void PerformLogin(HINTERNET hSession)
         return;
     }
 
+    DWORD disabledFeatures = WINHTTP_DISABLE_KEEP_ALIVE;
+    if (!WinHttpSetOption(hRequest.get(), WINHTTP_OPTION_DISABLE_FEATURE, &disabledFeatures, sizeof(disabledFeatures)))
+        cerr << "[警告] 禁用 WinHTTP keep-alive 失败: " << GetLastError() << endl;
+
     wstring hostHeader = L"Host: " + LOGIN_HOST;
     if (!WinHttpAddRequestHeaders(hRequest.get(), hostHeader.c_str(), (ULONG)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE))
     {
@@ -910,7 +906,6 @@ void PerformLogin(HINTERNET hSession)
     if (!WinHttpSendRequest(hRequest.get(), WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0))
     {
         cerr << "[错误] 发送请求失败: " << GetLastError() << endl;
-        ClearPortalAddressCache();
         return;
     }
 

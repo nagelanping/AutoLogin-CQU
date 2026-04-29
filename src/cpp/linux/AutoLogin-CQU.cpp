@@ -457,20 +457,12 @@ bool GetPortalAddress(string &resolvedIP)
         return true;
     }
 
-    static string cachedResolvedIP;
-    if (!cachedResolvedIP.empty())
-    {
-        resolvedIP = cachedResolvedIP;
-        return true;
-    }
-
-    if (!ResolveHostToIP(LOGIN_HOST, cachedResolvedIP))
+    if (!ResolveHostToIP(LOGIN_HOST, resolvedIP))
     {
         cerr << "autologin-cqu: error: failed to resolve host " << LOGIN_HOST << endl;
         return false;
     }
 
-    resolvedIP = cachedResolvedIP;
     return true;
 }
 
@@ -561,6 +553,8 @@ int main()
     curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT, TIMEOUT_SEC);
     curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, WriteCallback);
     curl_easy_setopt(curl.get(), CURLOPT_TCP_KEEPALIVE, 1L);
+    curl_easy_setopt(curl.get(), CURLOPT_FRESH_CONNECT, 1L);
+    curl_easy_setopt(curl.get(), CURLOPT_FORBID_REUSE, 1L);
     curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYHOST, 0L);
 
