@@ -1,4 +1,7 @@
 #define _WIN32_WINNT 0x0600
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
@@ -127,7 +130,8 @@ DWORD GetConfigSeconds(const map<string, string> &config, const string &key, DWO
 
     try
     {
-        if (!all_of(it->second.begin(), it->second.end(), [](unsigned char c) { return isdigit(c); }))
+        if (!all_of(it->second.begin(), it->second.end(), [](unsigned char c)
+                    { return isdigit(c); }))
             return defaultValue;
 
         unsigned long value = stoul(it->second, NULL, 10);
@@ -195,7 +199,7 @@ bool LoadConfig()
 
 // ================= 全局控制 =================
 HANDLE g_hExitEvent = NULL;
-HANDLE g_hPauseEvent = NULL;       // 暂停事件
+HANDLE g_hPauseEvent = NULL; // 暂停事件
 HANDLE g_hMessageReadyEvent = NULL;
 atomic<DWORD> g_dwMessageThreadId(0);
 atomic_bool g_bPaused(false);       // 暂停状态
