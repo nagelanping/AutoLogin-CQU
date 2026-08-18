@@ -96,6 +96,13 @@ string UnquoteYamlValue(const string &value)
     return result;
 }
 
+bool IsSupportedConfigKey(const string &key)
+{
+    return key == "STUDENT_ID" || key == "USER_PASSWORD" ||
+           key == "SERVER_IP" || key == "LOGIN_IP" ||
+           key == "CHECK_INTERVAL" || key == "TIMEOUT";
+}
+
 bool LoadYamlConfig(const string &filename, map<string, string> &config)
 {
     ifstream file(filename);
@@ -103,45 +110,60 @@ bool LoadYamlConfig(const string &filename, map<string, string> &config)
         return false;
 
     string line;
+    size_t lineNumber = 0;
     while (getline(file, line))
     {
+        ++lineNumber;
         string trimmed = Trim(line);
         if (trimmed.empty() || trimmed[0] == '#')
             continue;
 
         size_t delimiter = trimmed.find(':');
         if (delimiter == string::npos)
-            continue;
+        {
+            cerr << "[错误] config.yaml 第 " << lineNumber << " 行缺少 ':'。" << endl;
+            return false;
+        }
 
         string key = Trim(trimmed.substr(0, delimiter));
-        string value = UnquoteYamlValue(trimmed.substr(delimiter + 1));
-        if (!key.empty())
-            config[key] = value;
+        if (key.empty() || !IsSupportedConfigKey(key))
+        {
+            cerr << "[错误] config.yaml 第 " << lineNumber << " 行包含未知或空配置项。" << endl;
+            return false;
+        }
+        if (config.find(key) != config.end())
+        {
+            cerr << "[错误] config.yaml 第 " << lineNumber << " 行重复配置项: " << key << endl;
+            return false;
+        }
+
+        config[key] = UnquoteYamlValue(trimmed.substr(delimiter + 1));
     }
 
     return true;
 }
 
-DWORD GetConfigSeconds(const map<string, string> &config, const string &key, DWORD defaultValue, DWORD maxValue)
+bool TryGetConfigSeconds(const map<string, string> &config, const string &key, DWORD defaultValue, DWORD maxValue, DWORD &seconds)
 {
     map<string, string>::const_iterator it = config.find(key);
     if (it == config.end() || it->second.empty())
-        return defaultValue;
+    {
+        seconds = defaultValue;
+        return true;
+    }
 
     try
     {
-        if (!all_of(it->second.begin(), it->second.end(), [](unsigned char c)
-                    { return isdigit(c); }))
-            return defaultValue;
-
-        unsigned long value = stoul(it->second, NULL, 10);
-        if (value == 0)
-            return defaultValue;
-        return (DWORD)min<unsigned long>(value, maxValue);
+        size_t parsedLength = 0;
+        unsigned long value = stoul(it->second, &parsedLength, 10);
+        if (parsedLength != it->second.size() || value == 0 || value > maxValue)
+            return false;
+        seconds = static_cast<DWORD>(value);
+        return true;
     }
     catch (...)
     {
-        return defaultValue;
+        return false;
     }
 }
 
@@ -154,6 +176,18 @@ DWORD SecondsToMilliseconds(DWORD seconds)
 {
     DWORD maxSeconds = numeric_limits<DWORD>::max() / 1000;
     return min(seconds, maxSeconds) * 1000;
+}
+
+bool IsValidIpAddress(const string &value, bool ipv4Only)
+{
+    IN_ADDR ipv4 = {0};
+    if (InetPtonA(AF_INET, value.c_str(), &ipv4) == 1)
+        return true;
+    if (ipv4Only)
+        return false;
+
+    IN6_ADDR ipv6 = {0};
+    return InetPtonA(AF_INET6, value.c_str(), &ipv6) == 1;
 }
 
 bool LoadConfig()
@@ -189,9 +223,35 @@ bool LoadConfig()
         return false;
     }
 
+    if (!SERVER_IP.empty() && !IsValidIpAddress(SERVER_IP, false))
+    {
+        cerr << "[错误] SERVER_IP 必须是有效的 IPv4 或 IPv6 地址。" << endl;
+        return false;
+    }
+    if (!LOGIN_IP.empty() && !IsValidIpAddress(LOGIN_IP, true))
+    {
+        cerr << "[错误] LOGIN_IP 必须是有效的 IPv4 地址。" << endl;
+        return false;
+    }
+
+    DWORD checkIntervalSeconds = 0;
+    DWORD timeoutSeconds = 0;
+    if (!TryGetConfigSeconds(config, "CHECK_INTERVAL", DEFAULT_CHECK_INTERVAL_SECONDS,
+                             MAX_CHECK_INTERVAL_SECONDS, checkIntervalSeconds))
+    {
+        cerr << "[错误] CHECK_INTERVAL 必须是 1 到 " << MAX_CHECK_INTERVAL_SECONDS << " 秒的正整数。" << endl;
+        return false;
+    }
+    if (!TryGetConfigSeconds(config, "TIMEOUT", DEFAULT_TIMEOUT_SECONDS,
+                             MAX_TIMEOUT_SECONDS, timeoutSeconds))
+    {
+        cerr << "[错误] TIMEOUT 必须是 1 到 " << MAX_TIMEOUT_SECONDS << " 秒的正整数。" << endl;
+        return false;
+    }
+
     USER_ACCOUNT = string(",0,") + studentId;
-    CHECK_INTERVAL_MS = SecondsToMilliseconds(GetConfigSeconds(config, "CHECK_INTERVAL", DEFAULT_CHECK_INTERVAL_SECONDS, MAX_CHECK_INTERVAL_SECONDS));
-    TIMEOUT_MS = SecondsToMilliseconds(GetConfigSeconds(config, "TIMEOUT", DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS));
+    CHECK_INTERVAL_MS = SecondsToMilliseconds(checkIntervalSeconds);
+    TIMEOUT_MS = SecondsToMilliseconds(timeoutSeconds);
 
     cout << "[信息] 已加载配置文件: " << configPath << endl;
     return true;

@@ -1,6 +1,6 @@
 # AutoLogin-CQU 项目改进指南
 
-本文不是泛化的代码风格审查，而是给后续 agent 的实施顺序和边界说明。修改前先读本文件、`README.md`、`AGENTS.md` 和 `linux_systemd-setup.md`。
+本文是给后续 agent 的实施顺序和边界说明。修改前先读本文件、`README.md`和 `linux_systemd-setup.md`。
 
 > Python 版本不再维护；请勿查看或改动其归档内容。
 
@@ -29,13 +29,13 @@
 
 ## 2. 当前代码边界
 
-| 部分 | 当前实现 | 后续 agent 的边界 |
-| --- | --- | --- |
-| Linux | `src/linux/AutoLogin-CQU.cpp`，libcurl、POSIX API | 保持 systemd 服务模型，修复网络、配置和退出处理 |
-| Windows | `src/windows/AutoLogin-CQU.cpp`，WinHTTP、Win32 事件、托盘和快捷键 | 保留前后台双模式，收敛控制层与服务核心 |
-| systemd | `src/linux/autologin-cqu.service` | 继续作为模板使用，替换占位符后部署 |
-| 配置 | 两端各自的 `config.yaml` | 保持键名一致、校验规则一致 |
-| Python | 已归档 | 不查看、不修改、不做功能对齐 |
+| 部分    | 当前实现                                                             | 后续 agent 的边界                               |
+| ------- | -------------------------------------------------------------------- | ----------------------------------------------- |
+| Linux   | `src/linux/AutoLogin-CQU.cpp`，libcurl、POSIX API                  | 保持 systemd 服务模型，修复网络、配置和退出处理 |
+| Windows | `src/windows/AutoLogin-CQU.cpp`，WinHTTP、Win32 事件、托盘和快捷键 | 保留前后台双模式，收敛控制层与服务核心          |
+| systemd | `src/linux/autologin-cqu.service`                                  | 继续作为模板使用，替换占位符后部署              |
+| 配置    | 两端各自的`config.yaml`                                            | 保持键名一致、校验规则一致                      |
+| Python  | 已归档                                                               | 不查看、不修改、不做功能对齐                    |
 
 当前没有构建系统、测试套件、格式化工具、静态检查配置或 CI。不要假设存在 `make test`、`cmake --build` 或统一测试命令。
 
