@@ -1075,17 +1075,17 @@ cleanup:
 
     if (hConsoleMonitor)
     {
-        WaitForSingleObject(hConsoleMonitor, 500);
+        WaitForSingleObject(hConsoleMonitor, INFINITE);
         CloseHandle(hConsoleMonitor);
     }
     if (hKeyboardMonitor)
     {
-        WaitForSingleObject(hKeyboardMonitor, 500);
+        WaitForSingleObject(hKeyboardMonitor, INFINITE);
         CloseHandle(hKeyboardMonitor);
     }
     if (hMessageLoop)
     {
-        WaitForSingleObject(hMessageLoop, 1000);
+        WaitForSingleObject(hMessageLoop, INFINITE);
         CloseHandle(hMessageLoop);
     }
 
