@@ -31,7 +31,7 @@
 #define WINHTTP_DISABLE_KEEP_ALIVE 0x00000008
 #endif
 
-// 编译指令: g++ AutoLogin-CQU.cpp -o AutoLogin-CQU.exe -lwinhttp -liphlpapi -lws2_32 -lshell32 -luser32 -static
+// 编译指令: g++ <AutoLogin-CQU.cpp> -o <AutoLogin-CQU.exe> -lwinhttp -liphlpapi -lws2_32 -lshell32 -luser32 -static
 
 using namespace std;
 

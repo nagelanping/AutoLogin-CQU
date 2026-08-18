@@ -17,7 +17,7 @@
 #include <limits>
 #include <sysexits.h>
 
-// 编译指令: g++ AutoLogin-CQU.cpp -o AutoLogin-CQU -lcurl -O2
+// 编译指令: g++ <AutoLogin-CQU.cpp> -o <AutoLogin-CQU> -lcurl -O2
 // 依赖项:  curl
 
 using namespace std;
