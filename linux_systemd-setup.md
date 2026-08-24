@@ -211,10 +211,11 @@ sudo systemctl enable --now systemd-networkd-wait-online.service
 
 - `STUDENT_ID`：学号。
 - `USER_PASSWORD`：校园网密码。
-- `SERVER_IP`：认证服务器 IP。填写后跳过 `login.cqu.edu.cn` 的 DNS 解析，但请求仍发送 `Host: login.cqu.edu.cn`。
+- `SERVER_IP`：认证服务器 IP。填写后跳过 `login.cqu.edu.cn` 的 DNS 解析，但请求仍发送 `Host: login.cqu.edu.cn`。IPv6 地址直接填写，不带方括号。
+- `CA_BUNDLE`：CA 证书文件路径（可选）。门户证书不在系统 CA 中时使用；文件不可读时以退出码 `78` 失败。
 - `LOGIN_IP`：提交给认证服务器的客户端 IPv4。路由器/NAT 代登录场景可能需要；普通主机通常留空。
 - `CHECK_INTERVAL`：检查间隔，必须为正整数秒；非法值会回退默认值。
-- `TIMEOUT`：libcurl 请求超时，必须为正整数秒；非法值会回退默认值。该值不保证限制系统 DNS 解析耗时。
+- `TIMEOUT`：libcurl 请求超时，必须为正整数秒；非法值会回退默认值。
 
 DNS 排查：
 
@@ -224,6 +225,11 @@ nslookup login.cqu.edu.cn
 # 如系统安装了 bind/dnsutils，也可使用 dig
 dig login.cqu.edu.cn
 ```
+## TLS 证书校验
+
+程序启用 TLS 证书与主机名校验（`SSL_VERIFYPEER=1` / `SSL_VERIFYHOST=2`）。门户证书由系统 CA 签发时无需任何配置。
+
+从旧版本升级时注意：若门户使用校园内部 CA 或自签名证书，升级后必须设置 `CA_BUNDLE` 指向 CA 证书文件，否则连接会因证书校验失败而持续失败。证书文件对运行服务的用户可读即可。
 
 ## 故障排查
 
@@ -244,7 +250,7 @@ sudo systemd-analyze verify /etc/systemd/system/autologin-cqu.service
 
 ### 配置错误后不自动重启
 
-这是预期行为。缺少 `config.yaml`、缺少账号或密码时，程序会返回退出码 `78`，service 通过 `RestartPreventExitStatus=78` 停止反复重启。修复配置后执行：
+这是预期行为。缺少 `config.yaml`、缺少账号或密码、`CA_BUNDLE` 指向的文件不可读时，程序都会返回退出码 `78`，service 通过 `RestartPreventExitStatus=78` 停止反复重启。修复配置后执行：
 
 ```bash
 sudo systemctl restart autologin-cqu
@@ -280,6 +286,8 @@ sudo -u autologin-cqu ./AutoLogin-CQU
 ```
 
 日志中的 `ip=...` 是程序选择并提交给门户的本机 IPv4。多网卡、VPN、容器或路由器/NAT 环境下，如果该地址不是预期地址，可考虑在 `config.yaml` 中设置 `LOGIN_IP`。
+
+如果日志显示证书校验失败（如 curl error 60 `certificate verify failed`），说明门户证书不在系统 CA 中，设置 `CA_BUNDLE` 指向对应的 CA 证书文件后重启服务。
 
 ## 日志与隐私
 
