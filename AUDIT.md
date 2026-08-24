@@ -281,7 +281,7 @@ Linux 版本以 systemd 为唯一主要运行模型：
 4. 用最小 `Config` 结构替换全局配置；
 5. 添加离线响应分类检查。
 
-> 状态：第 1、4 项 Linux 侧已完成（`Config` 结构替换全局配置；未知键/重复键/非法行/非法数值/超范围/模板占位符/IP 格式/CA_BUNDLE 不可读均报错 exit 78，`CHECK_INTERVAL` 范围 5-3600、`TIMEOUT` 范围 1-300）。第 1 项 Windows 侧待做；第 2、3、5 项未开始。
+> 状态：第 1、4 项 Linux 侧已完成（`Config` 结构替换全局配置；未知键/重复键/非法行/非法数值/超范围/模板占位符/IP 格式/CA_BUNDLE 不可读均报错 exit 78，`CHECK_INTERVAL` 范围 5-3600、`TIMEOUT` 范围 1-300）。第 2、5 项已完成：以 Windows 既有严格读取实现 `ContainsJsonIntField` 为基准移植到 Linux，两端 `ClassifyLoginResponse` 分类规则逐字节一致；`./AutoLogin-CQU --self-test` 提供 14 例离线分类自检，失败退出 1。第 1 项 Windows 侧待做；第 3 项未开始。关联遗留：Windows 侧默认输出响应正文需按 §5.6 处理（不属于本阶段）。
 
 ### 第三阶段：修平台生命周期
 

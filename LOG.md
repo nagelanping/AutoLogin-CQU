@@ -1,5 +1,31 @@
 # AutoLogin-CQU 修改日志
 
+## 2026-08-24: 响应分类统一（Linux 移植 Windows 严格实现）+ 离线自检
+
+**范围**：`src/linux/AutoLogin-CQU.cpp`, `AUDIT.md`
+
+**改动**（第二阶段第 2、5 项）：
+
+1. 将 Windows 版严格 JSON 整数字段读取 `ContainsJsonIntField` 逐字移植到 Linux，重写 `ClassifyLoginResponse`；两端分类规则逐字节一致
+   - 消除旧实现的两个误判：`"result":12` 被前缀匹配误判为成功；`"result": 1`（冒号后带空格）漏判
+   - 现在支持：空格容忍、引号值、负号、完整整数边界（`12`≠`1`）
+2. `PerformLogin` Failed 日志增加 `response_bytes=N` 与达到 4096 上限时的 `(truncated)` 截断标记（§5.2 要求标记截断）；响应正文默认不记录（§5.6）
+3. 新增 `./AutoLogin-CQU --self-test`：14 例离线响应分类自检（成功/空格/字段顺序/引号值/ret_code 已在线/Drcom 已在线/认证失败/前缀不匹配/空响应/HTML 错误页/代理错误页/截断两种），覆盖 §5.2 点名的全部样例；任一失败退出 1，全过退出 0；不加载配置、不初始化 curl、不触网
+4. 新增 `#include <cctype>`（`isspace`/`isdigit`）
+
+**验证**：
+
+- `g++ -Wall -Wextra` 零警告
+- `--self-test` 14/14 通过；篡改一个期望值后正确报 FAIL 且退出 1（失败路径验证）
+- 真实门户冒烟：启动→`already online`→SIGTERM 优雅退出
+- 子代理审查：移植与 Windows 逐字节一致（diff 确认），14 例断言与统一规则自洽，无行为回归；4 条 P3 备注均维持现状
+- `git diff --check` 通过
+
+**遗留**：
+
+- Windows 侧默认输出响应正文需按 §5.6 改为调试选项门控（两端一起做）
+- 非 JSON 响应正文恰好含字面 `"result":1` 序列会误判（有效 JSON 无此风险；两端一致，§5.2 接受的小而严格路线）
+
 ## 2026-08-24: Linux 配置严格校验 + Config 结构
 
 **范围**：`src/linux/AutoLogin-CQU.cpp`, `src/linux/config.yaml`, `linux_systemd-setup.md`, `AUDIT.md`, `.gitignore`

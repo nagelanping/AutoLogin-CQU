@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <csignal>
 #include <cstring>
+#include <cctype>
 #include <memory>
 #include <unistd.h>
 #include <ifaddrs.h>
@@ -430,20 +431,63 @@ enum class LoginResult
     Failed
 };
 
+// 严格读取 JSON 中指定名称的整数字段（容忍空格、可选引号和负号）。
+// 与 Windows 版实现一致，保证两端响应分类规则相同。
+bool ContainsJsonIntField(const string &response, const string &key, int expected)
+{
+    string token = "\"" + key + "\"";
+    size_t pos = 0;
+
+    while ((pos = response.find(token, pos)) != string::npos)
+    {
+        pos += token.size();
+        while (pos < response.size() && isspace((unsigned char)response[pos]))
+            ++pos;
+        if (pos >= response.size() || response[pos] != ':')
+            continue;
+        ++pos;
+        while (pos < response.size() && isspace((unsigned char)response[pos]))
+            ++pos;
+
+        bool quoted = pos < response.size() && response[pos] == '"';
+        if (quoted)
+            ++pos;
+
+        size_t valueStart = pos;
+        if (pos < response.size() && response[pos] == '-')
+            ++pos;
+        while (pos < response.size() && isdigit((unsigned char)response[pos]))
+            ++pos;
+        if (valueStart == pos)
+            continue;
+
+        try
+        {
+            int value = stoi(response.substr(valueStart, pos - valueStart));
+            if (quoted && (pos >= response.size() || response[pos] != '"'))
+                continue;
+            if (value == expected)
+                return true;
+        }
+        catch (...)
+        {
+        }
+    }
+
+    return false;
+}
+
 LoginResult ClassifyLoginResponse(const string &response)
 {
-    if (response.find("\"result\":1") != string::npos)
+    if (ContainsJsonIntField(response, "result", 1))
         return LoginResult::Success;
 
-    if (response.find("\"ret_code\":2") != string::npos)
-        return LoginResult::AlreadyOnline;
+    bool alreadyOnline = ContainsJsonIntField(response, "ret_code", 2);
+    bool welcomeOnline = ContainsJsonIntField(response, "result", 0) &&
+                         ContainsJsonIntField(response, "ret_code", 1) &&
+                         response.find("Welcome to Drcom System") != string::npos;
 
-    if (response.find("\"result\":0") != string::npos &&
-        response.find("\"ret_code\":1") != string::npos &&
-        response.find("Welcome to Drcom System") != string::npos)
-        return LoginResult::AlreadyOnline;
-
-    return LoginResult::Failed;
+    return (alreadyOnline || welcomeOnline) ? LoginResult::AlreadyOnline : LoginResult::Failed;
 }
 
 
@@ -553,13 +597,62 @@ void PerformLogin(const Config &cfg, CURL *curl)
         cout << "autologin-cqu: already online ip=" << loginIpv4 << endl;
         break;
     case LoginResult::Failed:
-        cerr << "autologin-cqu: login failed ip=" << loginIpv4 << endl;
+        // response_bytes 与截断标记辅助区分认证失败/HTML 错误页/代理错误页；响应正文默认不记录
+        cerr << "autologin-cqu: login failed ip=" << loginIpv4
+             << " response_bytes=" << response.size()
+             << (response.size() >= MAX_RESPONSE_BYTES ? " (truncated)" : "") << endl;
         break;
     }
 }
 
-int main()
+// ================= 自检：离线响应分类检查 =================
+// 用法: ./AutoLogin-CQU --self-test （无需配置文件和网络）
+bool RunSelfTest()
 {
+    struct Case
+    {
+        const char *name;
+        string body;
+        LoginResult expected;
+    };
+    Case cases[] = {
+        {"success", "{\"result\":1,\"message\":\"Welcome to Drcom System\"}", LoginResult::Success},
+        {"success_whitespace", "{\"result\" : 1}", LoginResult::Success},
+        {"success_field_order", "{\"message\":\"Welcome to Drcom System\",\"result\":1}", LoginResult::Success},
+        {"success_quoted_value", "{\"result\":\"1\"}", LoginResult::Success},
+        {"already_online_ret_code", "{\"result\":0,\"ret_code\":2,\"message\":\"already online\"}", LoginResult::AlreadyOnline},
+        {"already_online_drcom", "{\"result\":0,\"ret_code\":1,\"message\":\"Welcome to Drcom System\"}", LoginResult::AlreadyOnline},
+        {"auth_failure", "{\"result\":0,\"ret_code\":1,\"message\":\"user not exist\"}", LoginResult::Failed},
+        {"result_prefix_must_not_match", "{\"result\":12}", LoginResult::Failed},
+        {"ret_code_prefix_must_not_match", "{\"ret_code\":21}", LoginResult::Failed},
+        {"empty_response", "", LoginResult::Failed},
+        {"html_error_page", "<html><head><title>502 Bad Gateway</title></head><body>gateway error</body></html>", LoginResult::Failed},
+        {"proxy_error_page", "Bad Gateway\r\nServer: proxy\r\n", LoginResult::Failed},
+        {"truncated_early_field", string("{\"result\":1,") + string(6000, 'x'), LoginResult::Success},
+        {"truncated_no_field", string(6000, 'x'), LoginResult::Failed},
+    };
+
+    int failedCount = 0;
+    for (const Case &c : cases)
+    {
+        LoginResult got = ClassifyLoginResponse(c.body);
+        if (got != c.expected)
+        {
+            ++failedCount;
+            cerr << "self-test: FAIL " << c.name << " expected=" << static_cast<int>(c.expected)
+                 << " got=" << static_cast<int>(got) << endl;
+        }
+    }
+    if (failedCount == 0)
+        cout << "self-test: " << (sizeof(cases) / sizeof(cases[0])) << " response classification checks passed" << endl;
+    return failedCount == 0;
+}
+
+int main(int argc, char *argv[])
+{
+    // 离线自检（第二阶段第 5 项）：不需要配置文件和网络
+    if (argc > 1 && strcmp(argv[1], "--self-test") == 0)
+        return RunSelfTest() ? 0 : 1;
     // 0. 加载并校验配置（任何错误 exit 78，由 systemd RestartPreventExitStatus 防止重启循环）
     Config cfg;
     if (!LoadConfig("config.yaml", cfg))
