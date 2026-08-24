@@ -6,7 +6,11 @@ USER_PASSWORD: xxxxxx
 
 # 服务器 IP（可选，用于绕过 DNS 解析，启用 DoH 时建议填写）
 # 可通过 nslookup login.cqu.edu.cn 或 dig login.cqu.edu.cn 查询 IP
+# IPv6 地址直接填写，不带方括号（例: 2408:4002::1）
 SERVER_IP: ""
+
+# 自定义 CA 证书文件路径（可选，用于校园网自签名证书或内部 CA）
+CA_BUNDLE: ""
 
 # 登录 IP（可选，用于指定提交给认证服务器的客户端 IPv4，适用于路由器接入场景）
 LOGIN_IP: ""

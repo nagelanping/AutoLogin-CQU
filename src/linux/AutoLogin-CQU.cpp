@@ -10,7 +10,6 @@
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <netdb.h>
-#include <arpa/inet.h>
 #include <curl/curl.h>
 #include <fstream>
 #include <algorithm>
@@ -33,6 +32,7 @@ string STUDENT_ID = "";
 string USER_PASSWORD = "";
 string SERVER_IP = "";
 string LOGIN_IP = "";
+string CA_BUNDLE = "";
 int CHECK_INTERVAL_SEC = 20;
 long TIMEOUT_SEC = 5;
 
@@ -161,6 +161,8 @@ bool LoadConfig(const string &filename)
             SERVER_IP = value;
         else if (key == "LOGIN_IP")
             LOGIN_IP = value;
+        else if (key == "CA_BUNDLE")
+            CA_BUNDLE = value;
         else if (key == "CHECK_INTERVAL")
             CHECK_INTERVAL_SEC = static_cast<int>(min(ParsePositiveLong(value, CHECK_INTERVAL_SEC), static_cast<long>(numeric_limits<int>::max())));
         else if (key == "TIMEOUT")
@@ -171,51 +173,6 @@ bool LoadConfig(const string &filename)
 
 // ================= 工具函数 =================
 
-// 解析主机名到 IP（优先 IPv4，回退 IPv6）
-bool ResolveHostToIP(const string &host, string &out_ip)
-{
-    out_ip.clear();
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    struct addrinfo *result = NULL;
-    int res = getaddrinfo(host.c_str(), NULL, &hints, &result);
-    if (res != 0 || result == NULL)
-        return false;
-
-    // 优先 IPv4
-    for (struct addrinfo *p = result; p != NULL; p = p->ai_next)
-    {
-        if (p->ai_family == AF_INET)
-        {
-            char ip[INET_ADDRSTRLEN] = {0};
-            struct sockaddr_in *sa = (struct sockaddr_in *)p->ai_addr;
-            inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
-            out_ip = ip;
-            freeaddrinfo(result);
-            return true;
-        }
-    }
-
-    // 再尝试 IPv6
-    for (struct addrinfo *p = result; p != NULL; p = p->ai_next)
-    {
-        if (p->ai_family == AF_INET6)
-        {
-            char ip[INET6_ADDRSTRLEN] = {0};
-            struct sockaddr_in6 *sa6 = (struct sockaddr_in6 *)p->ai_addr;
-            inet_ntop(AF_INET6, &sa6->sin6_addr, ip, sizeof(ip));
-            out_ip = ip;
-            freeaddrinfo(result);
-            return true;
-        }
-    }
-
-    freeaddrinfo(result);
-    return false;
-}
 
 // URL 编码
 string UrlEncode(const string &value)
@@ -371,19 +328,11 @@ LoginResult ClassifyLoginResponse(const string &response)
     return LoginResult::Failed;
 }
 
-string TruncateForLog(const string &value)
-{
-    const size_t maxLogBytes = 1024;
-    if (value.size() <= maxLogBytes)
-        return value;
 
-    return value.substr(0, maxLogBytes) + "...<truncated>";
-}
-
-string BuildLoginUrl(const string &resolvedIP, const string &loginIpv4, const string &ipv6)
+string BuildLoginUrl(const string &loginIpv4, const string &ipv6)
 {
     stringstream ss;
-    ss << "https://" << resolvedIP << ":" << LOGIN_PORT << LOGIN_PATH << "?"
+    ss << "https://" << LOGIN_HOST << ":" << LOGIN_PORT << LOGIN_PATH << "?"
        << "callback=dr1004"
        << "&login_method=1"
        << "&user_account=" << UrlEncode(",0," + STUDENT_ID)
@@ -449,22 +398,6 @@ bool GetLoginAddresses(string &loginIpv4, string &ipv6)
     return true;
 }
 
-bool GetPortalAddress(string &resolvedIP)
-{
-    if (!SERVER_IP.empty())
-    {
-        resolvedIP = SERVER_IP;
-        return true;
-    }
-
-    if (!ResolveHostToIP(LOGIN_HOST, resolvedIP))
-    {
-        cerr << "autologin-cqu: error: failed to resolve host " << LOGIN_HOST << endl;
-        return false;
-    }
-
-    return true;
-}
 
 void PerformLogin(CURL *curl)
 {
@@ -472,11 +405,7 @@ void PerformLogin(CURL *curl)
     if (!GetLoginAddresses(loginIpv4, ipv6))
         return;
 
-    string resolvedIP;
-    if (!GetPortalAddress(resolvedIP))
-        return;
-
-    string fullUrl = BuildLoginUrl(resolvedIP, loginIpv4, ipv6);
+    string fullUrl = BuildLoginUrl(loginIpv4, ipv6);
     curl_easy_setopt(curl, CURLOPT_URL, fullUrl.c_str());
 
     string response;
@@ -506,7 +435,7 @@ void PerformLogin(CURL *curl)
         cout << "autologin-cqu: already online ip=" << loginIpv4 << endl;
         break;
     case LoginResult::Failed:
-        cerr << "autologin-cqu: login failed ip=" << loginIpv4 << " response=" << TruncateForLog(response) << endl;
+        cerr << "autologin-cqu: login failed ip=" << loginIpv4 << endl;
         break;
     }
 }
@@ -531,6 +460,16 @@ int main()
         cout << "autologin-cqu: using configured login ip=" << LOGIN_IP << endl;
     }
 
+    if (!CA_BUNDLE.empty())
+    {
+        ifstream caFile(CA_BUNDLE);
+        if (!caFile.is_open())
+        {
+            cerr << "autologin-cqu: error: CA bundle not readable: " << CA_BUNDLE << endl;
+            return CONFIG_ERROR_EXIT_CODE;
+        }
+        cout << "autologin-cqu: using CA bundle " << CA_BUNDLE << endl;
+    }
     // 1. 信号处理
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
@@ -555,11 +494,19 @@ int main()
     curl_easy_setopt(curl.get(), CURLOPT_TCP_KEEPALIVE, 1L);
     curl_easy_setopt(curl.get(), CURLOPT_FRESH_CONNECT, 1L);
     curl_easy_setopt(curl.get(), CURLOPT_FORBID_REUSE, 1L);
-    curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYPEER, 0L);
-    curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYHOST, 0L);
-
-    string hostHeader = "Host: " + LOGIN_HOST;
-    unique_ptr<curl_slist, decltype(&curl_slist_free_all)> headers(curl_slist_append(NULL, hostHeader.c_str()), curl_slist_free_all);
+    curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYHOST, 2L);
+    if (!CA_BUNDLE.empty())
+        curl_easy_setopt(curl.get(), CURLOPT_CAINFO, CA_BUNDLE.c_str());
+    if (!SERVER_IP.empty())
+    {
+        string resolveEntry = LOGIN_HOST + ":" + to_string(LOGIN_PORT) + ":" + SERVER_IP;
+        if (SERVER_IP.find(':') != string::npos)
+            resolveEntry = LOGIN_HOST + ":" + to_string(LOGIN_PORT) + ":[" + SERVER_IP + "]";
+        curl_easy_setopt(curl.get(), CURLOPT_RESOLVE, resolveEntry.c_str());
+    }
+    // 显式设置 Host 头（不带端口，与门户协议保持一致）
+    unique_ptr<curl_slist, decltype(&curl_slist_free_all)> headers(curl_slist_append(NULL, ("Host: " + LOGIN_HOST).c_str()), curl_slist_free_all);
     if (!headers)
     {
         cerr << "autologin-cqu: error: curl header init failed" << endl;
