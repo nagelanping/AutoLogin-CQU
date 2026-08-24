@@ -169,6 +169,8 @@ sudo -u abc test -x /home/abc/AutoLogin-CQU_Linux_CPP/AutoLogin-CQU
 
 不建议在加密 home、网络挂载 home 或必须登录后才可访问的目录中配置开机自启服务。
 
+- 如果使用 User 级 systemctl, 删除 .service 文件中 `User=<USERNAME>` 这一行
+
 ## root 运行
 
 root 运行通常没有必要。程序只需要读取配置文件并发起出站 HTTPS 请求，不需要特权端口、网卡配置或额外 capability。只有在临时排查权限问题时才建议短时间改为 `User=root` 验证。

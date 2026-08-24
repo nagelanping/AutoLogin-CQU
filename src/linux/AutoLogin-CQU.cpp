@@ -292,7 +292,6 @@ bool LoadConfig(const string &filename, Config &cfg)
 
 // ================= 工具函数 =================
 
-
 // URL 编码
 string UrlEncode(const string &value)
 {
@@ -489,7 +488,6 @@ LoginResult ClassifyLoginResponse(const string &response)
 
     return (alreadyOnline || welcomeOnline) ? LoginResult::AlreadyOnline : LoginResult::Failed;
 }
-
 
 string BuildLoginUrl(const Config &cfg, const string &loginIpv4, const string &ipv6)
 {
@@ -759,7 +757,6 @@ bool GetLoginAddresses(const Config &cfg, string &loginIpv4, string &ipv6, strin
     addressSource = "heuristic";
     return true;
 }
-
 
 void PerformLogin(const Config &cfg, CURL *curl)
 {
