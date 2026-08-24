@@ -1,3 +1,4 @@
 .obsidian/
 release/
 *.code-workspace
+src/linux/AutoLogin-CQU

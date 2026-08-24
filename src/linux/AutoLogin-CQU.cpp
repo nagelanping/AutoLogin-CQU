@@ -10,10 +10,11 @@
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <netdb.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <curl/curl.h>
 #include <fstream>
 #include <algorithm>
-#include <limits>
 #include <sysexits.h>
 
 // 编译指令: g++ <AutoLogin-CQU.cpp> -o <AutoLogin-CQU> -lcurl -O2
@@ -28,13 +29,16 @@ const int CONFIG_ERROR_EXIT_CODE = EX_CONFIG;
 const size_t MAX_RESPONSE_BYTES = 4096;
 const string LOGIN_PATH = "/eportal/portal/login";
 const string USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-string STUDENT_ID = "";
-string USER_PASSWORD = "";
-string SERVER_IP = "";
-string LOGIN_IP = "";
-string CA_BUNDLE = "";
-int CHECK_INTERVAL_SEC = 20;
-long TIMEOUT_SEC = 5;
+struct Config
+{
+    string studentId;
+    string password;
+    string serverIp; // 可选：固定实际连接地址（IPv6 不带方括号）
+    string loginIp;  // 可选：提交给门户的客户端 IPv4
+    string caBundle; // 可选：自定义 CA 证书文件路径
+    int checkIntervalSec = 20;
+    long timeoutSec = 5;
+};
 
 // ================= 全局控制 =================
 volatile sig_atomic_t g_running = 1;
@@ -52,8 +56,20 @@ void SignalHandler(int signum)
 class CurlGlobal
 {
 public:
-    CurlGlobal() { curl_global_init(CURL_GLOBAL_ALL); }
-    ~CurlGlobal() { curl_global_cleanup(); }
+    CurlGlobal() : ok_(curl_global_init(CURL_GLOBAL_ALL) == CURLE_OK) {}
+    ~CurlGlobal()
+    {
+        if (ok_)
+            curl_global_cleanup();
+    }
+
+    bool ok() const
+    {
+        return ok_;
+    }
+
+private:
+    bool ok_;
 };
 
 // Curl Easy 句柄管理
@@ -113,61 +129,163 @@ string UnquoteYamlValue(const string &value)
     return result;
 }
 
-long ParsePositiveLong(const string &value, long defaultValue)
+void ConfigError(int lineNo, const string &message)
+{
+    cerr << "autologin-cqu: error: config.yaml line " << lineNo << ": " << message << endl;
+}
+
+// value 为空时使用默认值；否则必须是位于 [minValue, maxValue] 内的完整整数
+bool ParseBoundedLong(const string &value, long defaultValue, long minValue, long maxValue, const string &key, int lineNo, long &out)
 {
     if (value.empty())
-        return defaultValue;
+    {
+        out = defaultValue;
+        return true;
+    }
 
+    long parsed = 0;
     try
     {
         size_t parsedLength = 0;
-        long parsed = stol(value, &parsedLength);
-        return parsedLength == value.size() && parsed > 0 ? parsed : defaultValue;
+        parsed = stol(value, &parsedLength);
+        if (parsedLength != value.size())
+        {
+            ConfigError(lineNo, "invalid number for " + key + ": " + value);
+            return false;
+        }
     }
     catch (...)
     {
-        return defaultValue;
+        ConfigError(lineNo, "invalid number for " + key + ": " + value);
+        return false;
     }
+
+    if (parsed < minValue || parsed > maxValue)
+    {
+        ConfigError(lineNo, key + " must be in [" + to_string(minValue) + ", " + to_string(maxValue) + "], got " + to_string(parsed));
+        return false;
+    }
+
+    out = parsed;
+    return true;
 }
 
-// 加载配置文件
-bool LoadConfig(const string &filename)
+bool IsIPv4(const string &ip)
+{
+    struct in_addr addr;
+    return inet_pton(AF_INET, ip.c_str(), &addr) == 1;
+}
+
+bool IsIPv6(const string &ip)
+{
+    struct in6_addr addr;
+    return inet_pton(AF_INET6, ip.c_str(), &addr) == 1;
+}
+// 加载并校验配置文件；任何错误已打印并返回 false（调用方以 exit 78 退出）
+bool LoadConfig(const string &filename, Config &cfg)
 {
     ifstream file(filename);
     if (!file.is_open())
     {
+        cerr << "autologin-cqu: error: config.yaml not found or not readable" << endl;
         return false;
     }
 
+    vector<string> seenKeys;
     string line;
+    int lineNo = 0;
     while (getline(file, line))
     {
+        ++lineNo;
         string trimmed = Trim(line);
         if (trimmed.empty() || trimmed[0] == '#')
             continue;
 
         size_t delimiterPos = trimmed.find(':');
         if (delimiterPos == string::npos)
-            continue;
+        {
+            ConfigError(lineNo, "invalid line (missing ':')");
+            return false;
+        }
 
         string key = Trim(trimmed.substr(0, delimiterPos));
         string value = UnquoteYamlValue(trimmed.substr(delimiterPos + 1));
 
+        if (key.empty())
+        {
+            ConfigError(lineNo, "empty key");
+            return false;
+        }
+
+        bool known = key == "STUDENT_ID" || key == "USER_PASSWORD" || key == "SERVER_IP" ||
+                     key == "LOGIN_IP" || key == "CA_BUNDLE" || key == "CHECK_INTERVAL" || key == "TIMEOUT";
+        if (!known)
+        {
+            ConfigError(lineNo, "unknown key: " + key);
+            return false;
+        }
+
+        if (find(seenKeys.begin(), seenKeys.end(), key) != seenKeys.end())
+        {
+            ConfigError(lineNo, "duplicate key: " + key);
+            return false;
+        }
+        seenKeys.push_back(key);
+
         if (key == "STUDENT_ID")
-            STUDENT_ID = value;
+            cfg.studentId = value;
         else if (key == "USER_PASSWORD")
-            USER_PASSWORD = value;
+            cfg.password = value;
         else if (key == "SERVER_IP")
-            SERVER_IP = value;
+            cfg.serverIp = value;
         else if (key == "LOGIN_IP")
-            LOGIN_IP = value;
+            cfg.loginIp = value;
         else if (key == "CA_BUNDLE")
-            CA_BUNDLE = value;
+            cfg.caBundle = value;
         else if (key == "CHECK_INTERVAL")
-            CHECK_INTERVAL_SEC = static_cast<int>(min(ParsePositiveLong(value, CHECK_INTERVAL_SEC), static_cast<long>(numeric_limits<int>::max())));
-        else if (key == "TIMEOUT")
-            TIMEOUT_SEC = ParsePositiveLong(value, TIMEOUT_SEC);
+        {
+            long parsed;
+            if (!ParseBoundedLong(value, 20, 5, 3600, key, lineNo, parsed))
+                return false;
+            cfg.checkIntervalSec = static_cast<int>(parsed);
+        }
+        else // TIMEOUT
+        {
+            if (!ParseBoundedLong(value, 5, 1, 300, key, lineNo, cfg.timeoutSec))
+                return false;
+        }
     }
+
+    if (cfg.studentId.empty() || cfg.password.empty())
+    {
+        cerr << "autologin-cqu: error: account or password not configured" << endl;
+        return false;
+    }
+    if (cfg.studentId == "xxxxxxxx" || cfg.password == "xxxxxx")
+    {
+        cerr << "autologin-cqu: error: template placeholder not replaced, fill in real account and password" << endl;
+        return false;
+    }
+    if (!cfg.loginIp.empty() && !IsIPv4(cfg.loginIp))
+    {
+        cerr << "autologin-cqu: error: LOGIN_IP must be a valid IPv4 address: " << cfg.loginIp << endl;
+        return false;
+    }
+    if (!cfg.serverIp.empty() && !IsIPv4(cfg.serverIp) && !IsIPv6(cfg.serverIp))
+    {
+        cerr << "autologin-cqu: error: SERVER_IP must be a valid IP address (IPv6 without brackets): " << cfg.serverIp << endl;
+        return false;
+    }
+    if (!cfg.caBundle.empty())
+    {
+        ifstream caFile(cfg.caBundle);
+        if (!caFile.is_open())
+        {
+            cerr << "autologin-cqu: error: CA bundle not readable: " << cfg.caBundle << endl;
+            return false;
+        }
+    }
+
     return true;
 }
 
@@ -329,14 +447,14 @@ LoginResult ClassifyLoginResponse(const string &response)
 }
 
 
-string BuildLoginUrl(const string &loginIpv4, const string &ipv6)
+string BuildLoginUrl(const Config &cfg, const string &loginIpv4, const string &ipv6)
 {
     stringstream ss;
     ss << "https://" << LOGIN_HOST << ":" << LOGIN_PORT << LOGIN_PATH << "?"
        << "callback=dr1004"
        << "&login_method=1"
-       << "&user_account=" << UrlEncode(",0," + STUDENT_ID)
-       << "&user_password=" << UrlEncode(USER_PASSWORD)
+       << "&user_account=" << UrlEncode(",0," + cfg.studentId)
+       << "&user_password=" << UrlEncode(cfg.password)
        << "&wlan_user_ip=" << UrlEncode(loginIpv4)
        << "&wlan_user_ipv6=" << UrlEncode(ipv6)
        << "&wlan_user_mac=000000000000"
@@ -380,11 +498,11 @@ bool GetLocalIPv6(string &ipv6)
     return false;
 }
 
-bool GetLoginAddresses(string &loginIpv4, string &ipv6)
+bool GetLoginAddresses(const Config &cfg, string &loginIpv4, string &ipv6)
 {
-    if (!LOGIN_IP.empty())
+    if (!cfg.loginIp.empty())
     {
-        loginIpv4 = LOGIN_IP;
+        loginIpv4 = cfg.loginIp;
         GetLocalIPv6(ipv6);
         return true;
     }
@@ -399,13 +517,13 @@ bool GetLoginAddresses(string &loginIpv4, string &ipv6)
 }
 
 
-void PerformLogin(CURL *curl)
+void PerformLogin(const Config &cfg, CURL *curl)
 {
     string loginIpv4, ipv6;
-    if (!GetLoginAddresses(loginIpv4, ipv6))
+    if (!GetLoginAddresses(cfg, loginIpv4, ipv6))
         return;
 
-    string fullUrl = BuildLoginUrl(loginIpv4, ipv6);
+    string fullUrl = BuildLoginUrl(cfg, loginIpv4, ipv6);
     curl_easy_setopt(curl, CURLOPT_URL, fullUrl.c_str());
 
     string response;
@@ -442,34 +560,16 @@ void PerformLogin(CURL *curl)
 
 int main()
 {
-    // 0. 加载配置
-    if (!LoadConfig("config.yaml"))
-    {
-        cerr << "autologin-cqu: error: config.yaml not found" << endl;
+    // 0. 加载并校验配置（任何错误 exit 78，由 systemd RestartPreventExitStatus 防止重启循环）
+    Config cfg;
+    if (!LoadConfig("config.yaml", cfg))
         return CONFIG_ERROR_EXIT_CODE;
-    }
 
-    if (STUDENT_ID.empty() || USER_PASSWORD.empty())
-    {
-        cerr << "autologin-cqu: error: account or password not configured" << endl;
-        return CONFIG_ERROR_EXIT_CODE;
-    }
+    if (!cfg.loginIp.empty())
+        cout << "autologin-cqu: using configured login ip=" << cfg.loginIp << endl;
 
-    if (!LOGIN_IP.empty())
-    {
-        cout << "autologin-cqu: using configured login ip=" << LOGIN_IP << endl;
-    }
-
-    if (!CA_BUNDLE.empty())
-    {
-        ifstream caFile(CA_BUNDLE);
-        if (!caFile.is_open())
-        {
-            cerr << "autologin-cqu: error: CA bundle not readable: " << CA_BUNDLE << endl;
-            return CONFIG_ERROR_EXIT_CODE;
-        }
-        cout << "autologin-cqu: using CA bundle " << CA_BUNDLE << endl;
-    }
+    if (!cfg.caBundle.empty())
+        cout << "autologin-cqu: using CA bundle " << cfg.caBundle << endl;
     // 1. 信号处理
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
@@ -478,9 +578,14 @@ int main()
     sigaction(SIGTERM, &sa, NULL);
 
     // 2. 初始化 Libcurl
-    CurlGlobal curlGlobal;             // 全局初始化
-    ScopedCurl curl(curl_easy_init()); // 句柄初始化
+    CurlGlobal curlGlobal;
+    if (!curlGlobal.ok())
+    {
+        cerr << "autologin-cqu: error: curl global init failed" << endl;
+        return 1;
+    }
 
+    ScopedCurl curl(curl_easy_init());
     if (!curl)
     {
         cerr << "autologin-cqu: error: curl init failed" << endl;
@@ -489,20 +594,20 @@ int main()
 
     // 3. 设置 libcurl 选项
     curl_easy_setopt(curl.get(), CURLOPT_PROXY, "");
-    curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT, TIMEOUT_SEC);
+    curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT, cfg.timeoutSec);
     curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, WriteCallback);
     curl_easy_setopt(curl.get(), CURLOPT_TCP_KEEPALIVE, 1L);
     curl_easy_setopt(curl.get(), CURLOPT_FRESH_CONNECT, 1L);
     curl_easy_setopt(curl.get(), CURLOPT_FORBID_REUSE, 1L);
     curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYHOST, 2L);
-    if (!CA_BUNDLE.empty())
-        curl_easy_setopt(curl.get(), CURLOPT_CAINFO, CA_BUNDLE.c_str());
-    if (!SERVER_IP.empty())
+    if (!cfg.caBundle.empty())
+        curl_easy_setopt(curl.get(), CURLOPT_CAINFO, cfg.caBundle.c_str());
+    if (!cfg.serverIp.empty())
     {
-        string resolveEntry = LOGIN_HOST + ":" + to_string(LOGIN_PORT) + ":" + SERVER_IP;
-        if (SERVER_IP.find(':') != string::npos)
-            resolveEntry = LOGIN_HOST + ":" + to_string(LOGIN_PORT) + ":[" + SERVER_IP + "]";
+        string resolveEntry = LOGIN_HOST + ":" + to_string(LOGIN_PORT) + ":" + cfg.serverIp;
+        if (cfg.serverIp.find(':') != string::npos)
+            resolveEntry = LOGIN_HOST + ":" + to_string(LOGIN_PORT) + ":[" + cfg.serverIp + "]";
         curl_easy_setopt(curl.get(), CURLOPT_RESOLVE, resolveEntry.c_str());
     }
     // 显式设置 Host 头（不带端口，与门户协议保持一致）
@@ -514,18 +619,18 @@ int main()
     }
     curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, headers.get());
 
-    cout << "autologin-cqu: started interval=" << CHECK_INTERVAL_SEC << "s" << endl;
+    cout << "autologin-cqu: started interval=" << cfg.checkIntervalSec << "s" << endl;
 
     // 4. 主循环
     while (g_running)
     {
-        PerformLogin(curl.get());
+        PerformLogin(cfg, curl.get());
 
         // 睡眠等待
         // 如果收到信号，sleep 会被中断并返回剩余秒数，循环条件 g_running 变为 0，从而优雅退出
         if (g_running)
         {
-            sleep(CHECK_INTERVAL_SEC);
+            sleep(cfg.checkIntervalSec);
         }
     }
 

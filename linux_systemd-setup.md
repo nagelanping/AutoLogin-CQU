@@ -214,8 +214,10 @@ sudo systemctl enable --now systemd-networkd-wait-online.service
 - `SERVER_IP`：认证服务器 IP。填写后跳过 `login.cqu.edu.cn` 的 DNS 解析，但请求仍发送 `Host: login.cqu.edu.cn`。IPv6 地址直接填写，不带方括号。
 - `CA_BUNDLE`：CA 证书文件路径（可选）。门户证书不在系统 CA 中时使用；文件不可读时以退出码 `78` 失败。
 - `LOGIN_IP`：提交给认证服务器的客户端 IPv4。路由器/NAT 代登录场景可能需要；普通主机通常留空。
-- `CHECK_INTERVAL`：检查间隔，必须为正整数秒；非法值会回退默认值。
-- `TIMEOUT`：libcurl 请求超时，必须为正整数秒；非法值会回退默认值。
+- `CHECK_INTERVAL`：检查间隔（秒），有效范围 5-3600，默认 20；非法或超范围以退出码 `78` 失败。
+- `TIMEOUT`：libcurl 请求超时（秒），有效范围 1-300，默认 5；非法或超范围以退出码 `78` 失败。
+
+配置校验：`config.yaml` 由程序内建的简单校验读取。以下任一情况都会打印错误（含行号与原因）并以退出码 `78` 失败：文件缺失、非法行、空键、未知键、重复键、账号或密码为空、未替换的模板占位符（`xxxxxxxx`/`xxxxxx`）、`LOGIN_IP` 非合法 IPv4、`SERVER_IP` 非合法 IP、`CA_BUNDLE` 指向的文件不可读、数值超范围。
 
 DNS 排查：
 
@@ -250,7 +252,7 @@ sudo systemd-analyze verify /etc/systemd/system/autologin-cqu.service
 
 ### 配置错误后不自动重启
 
-这是预期行为。缺少 `config.yaml`、缺少账号或密码、`CA_BUNDLE` 指向的文件不可读时，程序都会返回退出码 `78`，service 通过 `RestartPreventExitStatus=78` 停止反复重启。修复配置后执行：
+这是预期行为。任何配置错误（`config.yaml` 缺失、非法行、未知/重复键、账号密码为空或未替换模板占位符、IP 格式非法、数值超范围、`CA_BUNDLE` 不可读）都会返回退出码 `78`，service 通过 `RestartPreventExitStatus=78` 停止反复重启。具体错误原因（含行号）可用 `journalctl -u autologin-cqu` 查看。修复配置后执行：
 
 ```bash
 sudo systemctl restart autologin-cqu

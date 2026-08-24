@@ -1,5 +1,34 @@
 # AutoLogin-CQU 修改日志
 
+## 2026-08-24: Linux 配置严格校验 + Config 结构
+
+**范围**：`src/linux/AutoLogin-CQU.cpp`, `src/linux/config.yaml`, `linux_systemd-setup.md`, `AUDIT.md`, `.gitignore`
+
+**改动**：
+
+1. 引入 `Config` 值结构，删除全部全局可写配置变量（第二阶段第 4 项）
+2. 配置校验统一进 `LoadConfig`，任何错误打印行号与原因后 exit 78：
+   - 文件缺失/不可读、非法行（无 `:`）、空键、未知键、重复键
+   - 账号或密码为空、未替换的模板占位符（`xxxxxxxx`/`xxxxxx`）
+   - `LOGIN_IP` 非合法 IPv4；`SERVER_IP` 非合法 IP（IPv6 不带方括号，`inet_pton` 校验）
+   - `CHECK_INTERVAL` 范围 5-3600、`TIMEOUT` 范围 1-300，非法数值不再静默回退默认值
+   - `CA_BUNDLE` 非空时文件必须可读（检查从 `main` 移入配置校验）
+3. `curl_global_init` 失败退出 1，成功时才执行 `curl_global_cleanup`
+4. 删除静默回退的 `ParsePositiveLong` 与未使用的 `<limits>` 头文件
+5. `config.yaml` 模板注释标注有效范围；部署文档同步校验规则与 exit 78 错误清单；`.gitignore` 忽略构建产物
+
+**验证**：
+
+- `g++ -Wall -Wextra` 零警告
+- 17 个错误路径逐项返回 78（行号错误信息正确）；合法配置启动，SIGTERM 优雅退出
+- 子代理审查：无阻塞问题；确认 URL 构造、TLS、RESOLVE、日志输出无行为回归
+- `git diff --check` 通过
+
+**遗留**：
+
+- Windows 侧配置校验规则对齐（第二阶段第 1 项剩余部分）
+- 存量部署若使用超范围值（如 `CHECK_INTERVAL: 4`）升级后会停服，需按报错修复配置
+
 ## 2026-08-24: systemd 部署文档补充 TLS 校验与 CA_BUNDLE 说明
 
 **范围**：`linux_systemd-setup.md`
