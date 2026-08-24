@@ -312,6 +312,8 @@ Linux 版本以 systemd 为唯一主要运行模型：
 3. Linux 只验证 systemd 服务路径、权限和信号退出；
 4. 不为两端强行统一不相同的生命周期。
 
+> 状态：第 3 项（Linux）无 root 部分验证已完成并全部通过（信号退出、退出码、工作目录、无临时文件/残留进程、unit 语法、权限模型，详见 `LOG.md`）；需 sudo 的实机 `systemctl start/stop/enable` 由机主执行。第 1、2 项为 Windows 侧，未开始。
+
 ### 第四阶段：补发布验证
 
 1. 固定 Linux 和 Windows 的实际编译命令；

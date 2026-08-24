@@ -1,5 +1,36 @@
 # AutoLogin-CQU 修改日志
 
+## 2026-08-24: 第三阶段第 3 项——Linux systemd 服务路径 / 权限 / 信号退出验证
+
+**范围**：无代码改动（验证类任务）。验证目标：`src/linux/AutoLogin-CQU`、`src/linux/autologin-cqu.service`、`linux_systemd-setup.md`。
+
+**验证结果**（无 root 部分，全部通过）：
+
+1. **信号退出**：`CHECK_INTERVAL=30` 下进程进入 `sleep(30)` 后发信号——SIGTERM 与 SIGINT 均立即优雅退出（时延 0.00s，退出码 0，打印 `stopped`），证明 `sleep` 被信号正确中断，不会傻等完整间隔。
+2. **退出码**：14 种配置错误（缺文件/账号密码空/未知键/重复键/非法行/超范围下限上限/非数字/IP 非法/模板占位符/CA_BUNDLE 不可读）全部返回 `78`；正常启动 + SIGTERM 返回 `0`。与 `RestartPreventExitStatus=78` 配合语义一致。
+3. **工作目录要求**：程序从工作目录读 `config.yaml`——有配置的目录启动成功；空目录（无 config.yaml）返回 `78` 并报 `config.yaml not found or not readable`。
+4. **无临时文件 / 无残留进程**：运行前后工作目录与 `/tmp` 快照对比无新增文件；主进程运行期间子进程数为 0，信号后主进程干净退出。
+5. **systemd unit 语法**：`systemd-analyze verify`（占位符替换后）返回 0，`RestartPreventExitStatus=78`、`Restart=on-failure`、`After/Wants=network-online.target`、`WorkingDirectory`、`ExecStart` 等关键指令齐全。两条提示均为测试环境因素（占位路径 `/opt/autologin-cqu` 本机不存在、临时用 `nobody` 触发 special-user 警告），非 unit 缺陷。
+6. **权限模型**：config 可读（644）→ 启动；config 不可读（000）→ 返回 `78`；二进制可执行位正常；`ldd` 确认 `libcurl.so.4` 已解析、无缺失依赖。
+
+**已知边界（非缺陷，无需改代码）**：
+
+- 信号若落在 `curl_easy_perform` 进行中的长请求里，优雅退出会延迟到该请求结束，最长等于 `TIMEOUT`。默认 `TIMEOUT=5` 时无影响（远小于 systemd 默认 `TimeoutStopSec=90s`）；仅当用户把 `TIMEOUT` 调到接近上限 300 且网络挂死时，`systemctl stop` 会在 90s 后 SIGKILL（仍会停，只是不优雅）。如部署时把 `TIMEOUT` 调大，可在 unit 里显式加 `TimeoutStopSec=` 对齐预期。
+
+**需 sudo / systemd 实机执行的步骤（本机无 root，交机主执行）**：
+
+```bash
+# 按 linux_systemd-setup.md 推荐方式安装后：
+sudo systemctl daemon-reload
+sudo systemctl start autologin-cqu
+sudo systemctl status autologin-cqu --no-pager      # 应 active (running)
+sudo journalctl -u autologin-cqu -n 50 --no-pager    # 应见 started / already online 或 login success
+sudo systemctl stop autologin-cqu                    # 应立即停止并打印 stopped
+sudo systemctl enable autologin-cqu                  # 开机自启
+```
+
+第四阶段第 5 项（systemd 容器内验证：有效配置启动 / 无效配置立即 78 / SIGTERM 干净退出 / 无残留）与上述步骤重叠，容器可用时按 `AUDIT.md` §4 复核即可。
+
 ## 2026-08-24: 统一 IPv4/IPv6 与 LOGIN_IP 语义（Linux 路由探测）
 
 **范围**：`src/linux/AutoLogin-CQU.cpp`, `AUDIT.md`
