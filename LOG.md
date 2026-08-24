@@ -1,5 +1,36 @@
 # AutoLogin-CQU 修改日志
 
+## 2026-08-24: 统一 IPv4/IPv6 与 LOGIN_IP 语义（Linux 路由探测）
+
+**范围**：`src/linux/AutoLogin-CQU.cpp`, `AUDIT.md`
+
+**改动**（第二阶段第 3 项）：
+
+1. 新增 `ResolvePortalDestination`：`SERVER_IP` 非空直接用（字面 IP），否则 `getaddrinfo` 解析门户域名（IPv4 优先，其次 IPv6）
+2. 新增 `ProbeRouteSource`：UDP socket `connect()`（不发真实报文）+ `getsockname()` 探测内核为到门户路由选定的源地址
+3. 新增 `GetOtherFamilyOnInterface`：定位包含给定地址的接口，取该接口另一地址族首个地址（v6 排除 `fe80::`/`::`）
+4. 重写 `GetLoginAddresses` 为 manual/route/heuristic 三级：
+   - manual：`LOGIN_IP` 非空 → `wlan_user_ip=LOGIN_IP`，v6 取同接口全局 v6（取不到退回首个全局 v6）
+   - route：探测得 v4 → v4 + 同接口 v6；探测得全局 v6 → v6 + 同接口 v4（无则启发式 v4）
+   - heuristic：探测失败退回既有接口/网段启发式，v6 优先取所选 v4 同接口全局 v6
+5. `PerformLogin` 三条结果行（success/already online/failed）追加地址来源 `(manual|route|heuristic)`
+6. `--self-test` 新增 5 个确定性断言：回环 UDP 探测 v4/v6、`SERVER_IP` 优先、同接口查找 `127.0.0.1<->::1` 双向
+
+**AUDIT.md**：写入第 3 项统一语义（两端一致的定义）+ Windows 修改方案（待 Windows 会话实施）；状态行更新。
+
+**验证**：
+
+- `g++ -Wall -Wextra` 零警告；`--self-test` 19 例（14 分类 + 5 地址）全过
+- 真实门户冒烟（route 模式）：`already online ip=10.244.77.2 (route)`，与 `ip route get <门户IP>` 的 `src 10.244.77.2 dev enp7s0` 一致
+- LOGIN_IP 冒烟（manual 模式）：`already online ip=10.244.99.99 (manual)` + 启动行 `using configured login ip`
+- 子代理审查：可提交，无阻塞；6 条低级别问题（文档措辞/边界）已修正进 AUDIT.md 与代码注释
+- `git diff --check` 通过
+
+**遗留 / 已知限制**：
+
+- `SERVER_IP` 为空时探测反映 v4 路由；libcurl 双栈可能走 v6 路由（单网卡同接口，影响可忽略；多网卡失配时再按族分别探测）
+- Windows 侧第 3 项待做（方案已写入 AUDIT.md）
+
 ## 2026-08-24: 响应分类统一（Linux 移植 Windows 严格实现）+ 离线自检
 
 **范围**：`src/linux/AutoLogin-CQU.cpp`, `AUDIT.md`

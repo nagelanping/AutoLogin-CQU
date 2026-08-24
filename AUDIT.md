@@ -281,7 +281,29 @@ Linux 版本以 systemd 为唯一主要运行模型：
 4. 用最小 `Config` 结构替换全局配置；
 5. 添加离线响应分类检查。
 
-> 状态：第 1、4 项 Linux 侧已完成（`Config` 结构替换全局配置；未知键/重复键/非法行/非法数值/超范围/模板占位符/IP 格式/CA_BUNDLE 不可读均报错 exit 78，`CHECK_INTERVAL` 范围 5-3600、`TIMEOUT` 范围 1-300）。第 2、5 项已完成：以 Windows 既有严格读取实现 `ContainsJsonIntField` 为基准移植到 Linux，两端 `ClassifyLoginResponse` 分类规则逐字节一致；`./AutoLogin-CQU --self-test` 提供 14 例离线分类自检，失败退出 1。第 1 项 Windows 侧待做；第 3 项未开始。关联遗留：Windows 侧默认输出响应正文需按 §5.6 处理（不属于本阶段）。
+**第 3 项统一语义（IPv4/IPv6 与 `LOGIN_IP`，Linux 已实现，Windows 按此跟进）**：
+
+- **目的地址**：`SERVER_IP` 非空则直接用（字面 IP）；否则 `getaddrinfo` 解析门户域名 `login.cqu.edu.cn`，优先首个 IPv4，其次首个 IPv6。
+- **路由探测**：向 `<目的地址>:<门户端口>` 建 UDP socket 并 `connect()`（不实际发包），用 `getsockname()` 得到内核为该路由选定的源地址。
+- **源地址映射**：
+  - 探测得 IPv4 → `wlan_user_ip` 用该地址；`wlan_user_ipv6` 取该 IPv4 所在接口的全局 IPv6（排除 `fe80::`/`::`），无则留空。
+  - 探测得全局 IPv6（非链路本地）→ `wlan_user_ipv6` 用该地址；`wlan_user_ip` 取同接口 IPv4，无则退回启发式。
+  - 探测失败（DNS 失败/无路由/仅链路本地源）→ 退回既有接口/网段启发式；此时 `wlan_user_ipv6` 优先取最终所选 IPv4 同接口的全局 v6。
+- **`LOGIN_IP`（manual）**：非空则 `wlan_user_ip = LOGIN_IP`（须为 IPv4），不做路由探测；`wlan_user_ipv6` 仍自动选取（LOGIN_IP 同接口全局 v6，取不到则首个全局 v6）。
+- **日志**：每次尝试的结果行（success/already online/failed）追加地址来源 `manual` / `route` / `heuristic`。
+- **原则**：不得仅因存在某个非链路本地 IPv6 就认定其可用于认证——自动模式（route/heuristic）下上报的 IPv6 必须绑定到实际通往认证服务器的接口，或留空；manual 兜底（LOGIN_IP 定位不到接口时取首个全局 v6）是用户显式指定路径的既有行为，NAT 场景常见。
+- **已知限制**：`SERVER_IP` 为空时目的地址取首个 IPv4（或唯一存在的族），探测反映的是 v4 路由；libcurl 双栈（Happy Eyeballs）实际可能走 v6 路由。单网卡时 v4/v6 源通常同接口，影响可忽略；多网卡且门户按源 IP 校验失配时，再改为按族分别探测取对。
+
+**第 3 项 Windows 修改方案**（待 Windows 会话实施，逻辑须与 Linux 逐条对应）：
+
+1. 目的地址：现有 `GetPortalAddress` 已实现“`SERVER_IP` 优先 + `ResolveHostToIP`（IPv4 优先、IPv6 回退）”，直接改造或内联其逻辑，不要新建第二个同职责函数。
+2. 新增 `ProbeRouteSource(destIp, srcIp)`：按目的地址族建 UDP socket（`WSASocket` 或 `socket`，`SOCK_DGRAM`），`connect()` 到 `<dest>:<LOGIN_PORT>`，`getsockname()` + `getnameinfo(NI_NUMERICHOST)` 得源地址；失败返回 false。
+3. 新增 `GetSameInterfaceAddress(addr, wantedFamily, out)`：遍历 `GetAdaptersAddresses` 的各 adapter，先定位包含 `addr` 的 adapter，再取该 adapter 上另一地址族的首个地址（v6 排除 `fe80::`/`::`）。
+4. 改造 `PerformLogin` 内（非 `main`）的地址选择为 manual/route/heuristic 三级：`LOGIN_IP` 非空 → manual（同接口 v6 取不到退回 `GetLocalIPs` 的 v6）；否则探测成功按映射规则；探测失败退回现有 `GetLocalIPs`（保留其接口类型 + 网段优先级，作为 heuristic 兜底），随后 v6 按“所选 v4 同接口全局 v6，取不到保留 `GetLocalIPs` 的 v6”覆盖，与 Linux 一致。
+5. 日志：三条结果行 `[成功] 登录成功` / `[成功] 设备已在线` / `[失败] 登录失败`（`LogLoginResult` 需扩签名接收 source）追加 `(route|manual|heuristic)`；`使用配置的登录 IP` 行现在在 `PerformLogin` 内每周期打印，保持不变。
+6. 不改动 `ContainsJsonIntField`/`ClassifyLoginResponse`（第 2 项已统一）；不引入新依赖。
+
+> 状态：第 1、4 项 Linux 侧已完成（`Config` 结构替换全局配置；未知键/重复键/非法行/非法数值/超范围/模板占位符/IP 格式/CA_BUNDLE 不可读均报错 exit 78，`CHECK_INTERVAL` 范围 5-3600、`TIMEOUT` 范围 1-300）。第 2、5 项已完成：以 Windows 既有严格读取实现 `ContainsJsonIntField` 为基准移植到 Linux，两端 `ClassifyLoginResponse` 分类规则逐字节一致；`./AutoLogin-CQU --self-test` 提供 14 例离线分类自检，失败退出 1。第 3 项 Linux 侧已完成（目的地址 + UDP 路由探测 + 同接口 IPv6 绑定 + `manual/route/heuristic` 来源日志，统一语义与 Windows 方案见上方第 3 项说明），Windows 侧待做。第 1 项 Windows 侧待做。关联遗留：Windows 侧默认输出响应正文需按 §5.6 处理（不属于本阶段）。
 
 ### 第三阶段：修平台生命周期
 

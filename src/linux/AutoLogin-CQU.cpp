@@ -542,29 +542,222 @@ bool GetLocalIPv6(string &ipv6)
     return false;
 }
 
-bool GetLoginAddresses(const Config &cfg, string &loginIpv4, string &ipv6)
+// ================= 地址选择 =================
+// 第二阶段第 3 项：两端语义一致，见 AUDIT.md 第二阶段第 3 项
+
+// 门户目的 IP：SERVER_IP 优先（字面 IP），否则解析门户域名（IPv4 优先，其次 IPv6）
+bool ResolvePortalDestination(const Config &cfg, string &destIp)
 {
-    if (!cfg.loginIp.empty())
+    if (!cfg.serverIp.empty())
     {
-        loginIpv4 = cfg.loginIp;
-        GetLocalIPv6(ipv6);
+        destIp = cfg.serverIp;
         return true;
     }
 
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    struct addrinfo *result = NULL;
+    if (getaddrinfo(LOGIN_HOST.c_str(), NULL, &hints, &result) != 0 || result == NULL)
+        return false;
+    unique_ptr<struct addrinfo, decltype(&freeaddrinfo)> guard(result, freeaddrinfo);
+
+    char ip[INET6_ADDRSTRLEN];
+    for (struct addrinfo *p = result; p != NULL; p = p->ai_next)
+    {
+        if (p->ai_family != AF_INET)
+            continue;
+        if (inet_ntop(AF_INET, &((struct sockaddr_in *)p->ai_addr)->sin_addr, ip, sizeof(ip)) != NULL)
+        {
+            destIp = ip;
+            return true;
+        }
+    }
+    for (struct addrinfo *p = result; p != NULL; p = p->ai_next)
+    {
+        if (p->ai_family != AF_INET6)
+            continue;
+        if (inet_ntop(AF_INET6, &((struct sockaddr_in6 *)p->ai_addr)->sin6_addr, ip, sizeof(ip)) != NULL)
+        {
+            destIp = ip;
+            return true;
+        }
+    }
+    return false;
+}
+
+// 用 UDP connect 探测到目的地址的路由源地址（不实际发送报文）
+bool ProbeRouteSource(const string &destIp, string &srcIp)
+{
+    struct sockaddr_storage dst;
+    memset(&dst, 0, sizeof(dst));
+    socklen_t dstLen;
+    int family;
+    if (IsIPv4(destIp))
+    {
+        family = AF_INET;
+        ((struct sockaddr_in *)&dst)->sin_family = family;
+        ((struct sockaddr_in *)&dst)->sin_port = htons(LOGIN_PORT);
+        inet_pton(AF_INET, destIp.c_str(), &((struct sockaddr_in *)&dst)->sin_addr);
+        dstLen = sizeof(struct sockaddr_in);
+    }
+    else if (IsIPv6(destIp))
+    {
+        family = AF_INET6;
+        ((struct sockaddr_in6 *)&dst)->sin6_family = family;
+        ((struct sockaddr_in6 *)&dst)->sin6_port = htons(LOGIN_PORT);
+        inet_pton(AF_INET6, destIp.c_str(), &((struct sockaddr_in6 *)&dst)->sin6_addr);
+        dstLen = sizeof(struct sockaddr_in6);
+    }
+    else
+        return false;
+
+    int fd = socket(family, SOCK_DGRAM, 0);
+    if (fd < 0)
+        return false;
+    bool ok = false;
+    struct sockaddr_storage src;
+    socklen_t srcLen = sizeof(src);
+    if (connect(fd, (struct sockaddr *)&dst, dstLen) == 0 &&
+        getsockname(fd, (struct sockaddr *)&src, &srcLen) == 0)
+    {
+        char host[NI_MAXHOST];
+        if (getnameinfo((struct sockaddr *)&src, srcLen, host, NI_MAXHOST, NULL, 0, NI_NUMERICHOST) == 0)
+        {
+            srcIp = host;
+            ok = true;
+        }
+    }
+    close(fd);
+    return ok;
+}
+
+// 找到包含 addr 的接口上另一个地址族的第一个地址（v6 要求全局，排除链路本地/未指定）
+// 注：匹配遍历时不排除回环接口（self-test 依赖 127.0.0.1<->::1 命中 lo）；LOGIN_IP=127.x 属误配置
+bool GetOtherFamilyOnInterface(const string &addr, int wantedFamily, string &out)
+{
+    out.clear();
+    struct ifaddrs *ifaddr;
+    if (getifaddrs(&ifaddr) == -1)
+        return false;
+    unique_ptr<struct ifaddrs, void (*)(struct ifaddrs *)> guard(ifaddr, freeifaddrs);
+
+    string ifname;
+    for (struct ifaddrs *ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next)
+    {
+        if (ifa->ifa_addr == NULL)
+            continue;
+        int fam = ifa->ifa_addr->sa_family;
+        if (fam != AF_INET && fam != AF_INET6)
+            continue;
+        char host[NI_MAXHOST];
+        if (getnameinfo(ifa->ifa_addr,
+                        (fam == AF_INET) ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6),
+                        host, NI_MAXHOST, NULL, 0, NI_NUMERICHOST) != 0)
+            continue;
+        string h = host;
+        size_t pos = h.find('%');
+        if (pos != string::npos)
+            h = h.substr(0, pos);
+        if (h == addr)
+        {
+            ifname = ifa->ifa_name;
+            break;
+        }
+    }
+    if (ifname.empty())
+        return false;
+
+    for (struct ifaddrs *ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next)
+    {
+        if (ifa->ifa_addr == NULL || ifa->ifa_name == NULL || string(ifa->ifa_name) != ifname)
+            continue;
+        int fam = ifa->ifa_addr->sa_family;
+        if (fam != wantedFamily)
+            continue;
+        char host[NI_MAXHOST];
+        if (getnameinfo(ifa->ifa_addr,
+                        (fam == AF_INET) ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6),
+                        host, NI_MAXHOST, NULL, 0, NI_NUMERICHOST) != 0)
+            continue;
+        string h = host;
+        size_t pos = h.find('%');
+        if (pos != string::npos)
+            h = h.substr(0, pos);
+        if (wantedFamily == AF_INET6 && (strncmp(h.c_str(), "fe80", 4) == 0 || h == "::"))
+            continue;
+        out = h;
+        return true;
+    }
+    return false;
+}
+
+// 地址选择：manual = LOGIN_IP 显式指定；route = 按到认证服务器的路由选定源地址；
+// heuristic = 接口/网段启发式兜底。语义与 Windows 版一致（见 AUDIT.md 第二阶段第 3 项）。
+bool GetLoginAddresses(const Config &cfg, string &loginIpv4, string &ipv6, string &addressSource)
+{
+    ipv6.clear();
+
+    if (!cfg.loginIp.empty())
+    {
+        loginIpv4 = cfg.loginIp;
+        if (!GetOtherFamilyOnInterface(loginIpv4, AF_INET6, ipv6))
+            GetLocalIPv6(ipv6);
+        addressSource = "manual";
+        return true;
+    }
+
+    string dest;
+    string src;
+    if (ResolvePortalDestination(cfg, dest) && ProbeRouteSource(dest, src))
+    {
+        if (IsIPv4(src))
+        {
+            loginIpv4 = src;
+            GetOtherFamilyOnInterface(src, AF_INET6, ipv6);
+            addressSource = "route";
+            return true;
+        }
+        // 探测结果为 IPv6：必须为全局地址（非链路本地）
+        if (IsIPv6(src) && strncmp(src.c_str(), "fe80", 4) != 0)
+        {
+            ipv6 = src;
+            if (GetOtherFamilyOnInterface(src, AF_INET, loginIpv4))
+            {
+                addressSource = "route";
+                return true;
+            }
+            // 仅 v6 路由：IPv4 提交值退回启发式
+            string fallbackIpv4;
+            string fallbackIpv6;
+            if (!GetLocalIPs(fallbackIpv4, fallbackIpv6))
+                return false;
+            loginIpv4 = fallbackIpv4;
+            addressSource = "route";
+            return true;
+        }
+    }
+
+    // 兜底：接口/网段启发式；上报 v6 优先取所选 v4 同接口的全局 v6
     if (!GetLocalIPs(loginIpv4, ipv6))
     {
         cerr << "autologin-cqu: error: failed to get local IPv4 address" << endl;
         return false;
     }
-
+    string sameIfaceV6;
+    if (GetOtherFamilyOnInterface(loginIpv4, AF_INET6, sameIfaceV6))
+        ipv6 = sameIfaceV6;
+    addressSource = "heuristic";
     return true;
 }
 
 
 void PerformLogin(const Config &cfg, CURL *curl)
 {
-    string loginIpv4, ipv6;
-    if (!GetLoginAddresses(cfg, loginIpv4, ipv6))
+    string loginIpv4, ipv6, addressSource;
+    if (!GetLoginAddresses(cfg, loginIpv4, ipv6, addressSource))
         return;
 
     string fullUrl = BuildLoginUrl(cfg, loginIpv4, ipv6);
@@ -591,14 +784,14 @@ void PerformLogin(const Config &cfg, CURL *curl)
     switch (ClassifyLoginResponse(response))
     {
     case LoginResult::Success:
-        cout << "autologin-cqu: login success ip=" << loginIpv4 << endl;
+        cout << "autologin-cqu: login success ip=" << loginIpv4 << " (" << addressSource << ")" << endl;
         break;
     case LoginResult::AlreadyOnline:
-        cout << "autologin-cqu: already online ip=" << loginIpv4 << endl;
+        cout << "autologin-cqu: already online ip=" << loginIpv4 << " (" << addressSource << ")" << endl;
         break;
     case LoginResult::Failed:
         // response_bytes 与截断标记辅助区分认证失败/HTML 错误页/代理错误页；响应正文默认不记录
-        cerr << "autologin-cqu: login failed ip=" << loginIpv4
+        cerr << "autologin-cqu: login failed ip=" << loginIpv4 << " (" << addressSource << ")"
              << " response_bytes=" << response.size()
              << (response.size() >= MAX_RESPONSE_BYTES ? " (truncated)" : "") << endl;
         break;
@@ -606,7 +799,7 @@ void PerformLogin(const Config &cfg, CURL *curl)
 }
 
 // ================= 自检：离线响应分类检查 =================
-// 用法: ./AutoLogin-CQU --self-test （无需配置文件和网络）
+// 用法: ./AutoLogin-CQU --self-test （无需配置文件和网络；地址探测断言要求 IPv6 回环可用）
 bool RunSelfTest()
 {
     struct Case
@@ -643,8 +836,44 @@ bool RunSelfTest()
                  << " got=" << static_cast<int>(got) << endl;
         }
     }
+    // 地址选择：回环 UDP 探测应返回回环地址（不实际发送报文）
+    string src;
+    if (!(ProbeRouteSource("127.0.0.1", src) && src == "127.0.0.1"))
+    {
+        ++failedCount;
+        cerr << "self-test: FAIL probe_ipv4_loopback got=" << src << endl;
+    }
+    src.clear();
+    if (!(ProbeRouteSource("::1", src) && src == "::1"))
+    {
+        ++failedCount;
+        cerr << "self-test: FAIL probe_ipv6_loopback got=" << src << endl;
+    }
+    // 门户目的 IP：SERVER_IP 优先于域名解析
+    Config probeCfg;
+    probeCfg.serverIp = "192.0.2.1";
+    string dest;
+    if (!(ResolvePortalDestination(probeCfg, dest) && dest == "192.0.2.1"))
+    {
+        ++failedCount;
+        cerr << "self-test: FAIL resolve_server_ip got=" << dest << endl;
+    }
+    // 同接口地址查找：回环接口上 127.0.0.1 <-> ::1 双向可查
+    string other;
+    if (!(GetOtherFamilyOnInterface("127.0.0.1", AF_INET6, other) && other == "::1"))
+    {
+        ++failedCount;
+        cerr << "self-test: FAIL same_iface_v6 got=" << other << endl;
+    }
+    other.clear();
+    if (!(GetOtherFamilyOnInterface("::1", AF_INET, other) && other == "127.0.0.1"))
+    {
+        ++failedCount;
+        cerr << "self-test: FAIL same_iface_v4 got=" << other << endl;
+    }
+
     if (failedCount == 0)
-        cout << "self-test: " << (sizeof(cases) / sizeof(cases[0])) << " response classification checks passed" << endl;
+        cout << "self-test: response classification and address selection checks passed" << endl;
     return failedCount == 0;
 }
 
