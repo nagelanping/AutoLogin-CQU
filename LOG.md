@@ -1,5 +1,26 @@
 # AutoLogin-CQU 修改日志
 
+## 2026-08-24: v2.0.0 生产级测试版打磨——修复 SERVER_IP 段错误 + 可观测性
+
+**范围**：`src/linux/AutoLogin-CQU.cpp`。目标：交付 v2.0.0 生产级测试版二进制。
+
+**关键修复——CURLOPT_RESOLVE 段错误（🔴 阻断级）**：
+
+- **症状**：配置 `SERVER_IP` 时，`curl_easy_perform` 内**间歇性段错误**（rc=139/SIGSEGV）。非确定性——取决于 ASLR/内存布局，有时崩有时不崩（此前 item 3 冒烟用 `SERVER_IP=10.244.99.99` 恰好没崩，掩盖了此 bug）。
+- **根因**：`curl_easy_setopt(curl, CURLOPT_RESOLVE, resolveEntry.c_str())` 把 `const char*` 传给了要求 `curl_slist*` 的选项；libcurl 把字符串指针当链表头解引用。经 libcurl 官方文档确认：`CURLOPT_RESOLVE` 要求 `struct curl_slist*`，且 libcurl **不深拷贝**该列表，调用方必须让列表存活到 handle 不再做传输。
+- **修法**：用 `curl_slist_append` 构建 slist，在 main 作用域声明 `unique_ptr<curl_slist, decltype(&curl_slist_free_all)> resolveList(nullptr, curl_slist_free_all);`（与既有 `headers` 同模式），条件 `.reset()` 后传 `.get()` 给 setopt。slist 存活覆盖主循环内所有 `curl_easy_perform`，析构顺序（slist 先于 handle）安全。
+- **附带**：`(nullptr, deleter)` 两参构造需 C++14+（项目固定构建默认 gnu++14+，OK）；函数指针删除器的 `unique_ptr` 不可默认构造（SFINAE 约束），故不能用默认构造初始化。
+- **验证**：修复前真实/假 SERVER_IP 均段错误；修复后均不再崩，优雅报 `Could not connect to server`；无 SERVER_IP 正常路径实测返回 `already online`，无回归。
+
+**可观测性打磨**：
+
+1. 新增 `SERVER_IP` 启动日志 `using configured server ip=X`（与既有 `LOGIN_IP` 日志对称，便于实机确认连接目标；SERVER_IP 为部署侧目标 IP，非凭据/非 URL，可入日志）。
+2. 补 `GetLoginAddresses` route-v6-only 分支的失败日志（子代理审查发现）：纯 IPv6 主机探测到 v6 路由但无可用 IPv4 时，原代码 `return false` 无日志，服务每 20s 静默重试、journald 无痕迹；现报 `no local IPv4 available for login (v6 route only)`。
+
+**审查**：子代理独立审查（重点段错误修复正确性/slist 生命周期/IPv6 分支/生产就绪度）结论**可提交**，无阻断项；采纳其 1 条 🟡 建议（上述失败日志），跳过 1 条（建议改用默认构造，实为不可行——默认构造编译不过）。
+
+**验证**：`g++ -O2 -Wall -Wextra` 0 警告；`--self-test` 19 项全过；SERVER_IP 场景不再段错误；正常路径无回归。
+
 ## 2026-08-24: 第三阶段第 3 项——Linux systemd 服务路径 / 权限 / 信号退出验证
 
 **范围**：无代码改动（验证类任务）。验证目标：`src/linux/AutoLogin-CQU`、`src/linux/autologin-cqu.service`、`linux_systemd-setup.md`。

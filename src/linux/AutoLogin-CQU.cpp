@@ -733,7 +733,10 @@ bool GetLoginAddresses(const Config &cfg, string &loginIpv4, string &ipv6, strin
             string fallbackIpv4;
             string fallbackIpv6;
             if (!GetLocalIPs(fallbackIpv4, fallbackIpv6))
+            {
+                cerr << "autologin-cqu: error: no local IPv4 available for login (v6 route only)" << endl;
                 return false;
+            }
             loginIpv4 = fallbackIpv4;
             addressSource = "route";
             return true;
@@ -890,6 +893,9 @@ int main(int argc, char *argv[])
     if (!cfg.loginIp.empty())
         cout << "autologin-cqu: using configured login ip=" << cfg.loginIp << endl;
 
+    if (!cfg.serverIp.empty())
+        cout << "autologin-cqu: using configured server ip=" << cfg.serverIp << endl;
+
     if (!cfg.caBundle.empty())
         cout << "autologin-cqu: using CA bundle " << cfg.caBundle << endl;
     // 1. 信号处理
@@ -925,12 +931,23 @@ int main(int argc, char *argv[])
     curl_easy_setopt(curl.get(), CURLOPT_SSL_VERIFYHOST, 2L);
     if (!cfg.caBundle.empty())
         curl_easy_setopt(curl.get(), CURLOPT_CAINFO, cfg.caBundle.c_str());
+    // 设置 SERVER_IP 时通过 CURLOPT_RESOLVE 固定连接目标（绕过 DNS，Host 头保持 LOGIN_HOST）
+    // 注意：CURLOPT_RESOLVE 要求 curl_slist*，且 libcurl 不深拷贝该列表，
+    // 列表必须在 handle 生命周期内保持存活（在 main 作用域声明，与下方 headers 一致），
+    // 否则 curl_easy_perform 读取已释放的列表，触发间歇性段错误。
+    unique_ptr<curl_slist, decltype(&curl_slist_free_all)> resolveList(nullptr, curl_slist_free_all);
     if (!cfg.serverIp.empty())
     {
         string resolveEntry = LOGIN_HOST + ":" + to_string(LOGIN_PORT) + ":" + cfg.serverIp;
         if (cfg.serverIp.find(':') != string::npos)
             resolveEntry = LOGIN_HOST + ":" + to_string(LOGIN_PORT) + ":[" + cfg.serverIp + "]";
-        curl_easy_setopt(curl.get(), CURLOPT_RESOLVE, resolveEntry.c_str());
+        resolveList.reset(curl_slist_append(NULL, resolveEntry.c_str()));
+        if (!resolveList)
+        {
+            cerr << "autologin-cqu: error: curl resolve init failed" << endl;
+            return 1;
+        }
+        curl_easy_setopt(curl.get(), CURLOPT_RESOLVE, resolveList.get());
     }
     // 显式设置 Host 头（不带端口，与门户协议保持一致）
     unique_ptr<curl_slist, decltype(&curl_slist_free_all)> headers(curl_slist_append(NULL, ("Host: " + LOGIN_HOST).c_str()), curl_slist_free_all);
