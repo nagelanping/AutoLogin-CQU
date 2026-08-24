@@ -38,6 +38,8 @@
 4. 确认系统已安装 libcurl 运行库（Arch Linux 由 `curl` 包提供）
 5. 进入解压目录后运行 `./AutoLogin-CQU`（不推荐长期手动运行，建议配置 systemd 启动项，请参考 `linux_systemd-setup.md`）
 
+离线自检：`./AutoLogin-CQU --self-test` 在不读取配置文件、不访问网络的情况下校验响应分类与本机地址选择逻辑，全部通过时退出码为 `0`。可用于部署前确认二进制在目标系统可正常运行。
+
 ---
 
 ## **许可证**

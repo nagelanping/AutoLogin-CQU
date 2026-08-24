@@ -203,7 +203,7 @@ sudo systemctl enable --now NetworkManager-wait-online.service
 sudo systemctl enable --now systemd-networkd-wait-online.service
 ```
 
-即使启动早于校园网门户可用，程序也会按 `CHECK_INTERVAL` 周期重试。启动初期偶发 `failed to resolve host` 或 `failed to get local IPv4 address` 不一定代表 service 配置错误。
+即使启动早于校园网门户可用，程序也会按 `CHECK_INTERVAL` 周期重试。启动初期偶发 `warning: DNS resolution of login.cqu.edu.cn failed; falling back to heuristic address`，或 libcurl 的域名解析失败消息（如 `Could not resolve host`），不一定代表 service 配置错误。设置 `SERVER_IP` 后程序绕过 DNS 解析，不会出现上述消息。
 
 ## 配置项说明
 
@@ -227,6 +227,7 @@ nslookup login.cqu.edu.cn
 # 如系统安装了 bind/dnsutils，也可使用 dig
 dig login.cqu.edu.cn
 ```
+
 ## TLS 证书校验
 
 程序启用 TLS 证书与主机名校验（`SSL_VERIFYPEER=1` / `SSL_VERIFYHOST=2`）。门户证书由系统 CA 签发时无需任何配置。
@@ -287,7 +288,7 @@ cd /opt/autologin-cqu
 sudo -u autologin-cqu ./AutoLogin-CQU
 ```
 
-日志中的 `ip=...` 是程序选择并提交给门户的本机 IPv4。多网卡、VPN、容器或路由器/NAT 环境下，如果该地址不是预期地址，可考虑在 `config.yaml` 中设置 `LOGIN_IP`。
+日志中的 `ip=...` 是程序选择并提交给门户的本机 IPv4，括号内标签表示该地址的来源：`manual` 为 `LOGIN_IP` 显式指定；`route` 为按到认证服务器的路由选定源地址；`route-v4-fallback` 为路由探测仅得到 IPv6 且同接口无可用 IPv4，上报 IPv4 退回启发式选定；`heuristic` 为按接口/网段启发式选定。多网卡、VPN、容器或路由器/NAT 环境下，如果该地址不是预期地址，可考虑在 `config.yaml` 中设置 `LOGIN_IP`。
 
 如果日志显示证书校验失败（如 curl error 60 `certificate verify failed`），说明门户证书不在系统 CA 中，设置 `CA_BUNDLE` 指向对应的 CA 证书文件后重启服务。
 
