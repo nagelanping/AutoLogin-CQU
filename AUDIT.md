@@ -3,6 +3,8 @@
 本文是给后续 agent 的实施顺序和边界说明。修改前先读本文件、`README.md`和 `linux_systemd-setup.md`。
 
 > Python 版本不再维护；请勿查看或改动其归档内容。
+>
+> **现状（2026-08-25）**：Linux 版本（`src/linux/`）已完成——四个阶段的 Linux 侧项全部完成并通过实机验证（v2.0.0，详见 `LOG.md`）。Windows 侧（`src/windows/`）未开始，按第二、三、四阶段推进。
 
 ## 1. 产品定位：先不要改错目标
 
@@ -272,7 +274,9 @@ Linux 版本以 systemd 为唯一主要运行模型：
 3. 保持默认域名请求目标；
 4. 将 `SERVER_IP` 改成“域名逻辑主机名 + 固定实际连接地址”的高级模式；
 5. 默认停止输出完整响应和 URL。
+
 > 状态：以上 5 项均已完成（commit f691b06，含 `CA_BUNDLE` 配置项与 `CURLOPT_RESOLVE` 语义，详见 `LOG.md`）。
+>
 ### 第二阶段：统一协议行为
 
 1. 统一两端配置字段和校验规则；
@@ -303,7 +307,7 @@ Linux 版本以 systemd 为唯一主要运行模型：
 5. 日志：三条结果行 `[成功] 登录成功` / `[成功] 设备已在线` / `[失败] 登录失败`（`LogLoginResult` 需扩签名接收 source）追加 `(route|manual|heuristic)`；`使用配置的登录 IP` 行现在在 `PerformLogin` 内每周期打印，保持不变。
 6. 不改动 `ContainsJsonIntField`/`ClassifyLoginResponse`（第 2 项已统一）；不引入新依赖。
 
-> 状态：第 1、4 项 Linux 侧已完成（`Config` 结构替换全局配置；未知键/重复键/非法行/非法数值/超范围/模板占位符/IP 格式/CA_BUNDLE 不可读均报错 exit 78，`CHECK_INTERVAL` 范围 5-3600、`TIMEOUT` 范围 1-300）。第 2、5 项已完成：以 Windows 既有严格读取实现 `ContainsJsonIntField` 为基准移植到 Linux，两端 `ClassifyLoginResponse` 分类规则逐字节一致；`./AutoLogin-CQU --self-test` 提供 14 例离线分类自检，失败退出 1。第 3 项 Linux 侧已完成（目的地址 + UDP 路由探测 + 同接口 IPv6 绑定 + `manual/route/heuristic` 来源日志，统一语义与 Windows 方案见上方第 3 项说明），Windows 侧待做。第 1 项 Windows 侧待做。关联遗留：Windows 侧默认输出响应正文需按 §5.6 处理（不属于本阶段）。
+> 状态：第 1、4 项 Linux 侧已完成（`Config` 结构替换全局配置；未知键/重复键/非法行/非法数值/超范围/模板占位符/IP 格式/CA_BUNDLE 不可读均报错 exit 78，`CHECK_INTERVAL` 范围 5-3600、`TIMEOUT` 范围 1-300）。第 2、5 项已完成：以 Windows 既有严格读取实现 `ContainsJsonIntField` 为基准移植到 Linux，两端 `ClassifyLoginResponse` 分类规则逐字节一致；`./AutoLogin-CQU --self-test` 提供 14 例离线分类自检，失败退出 1。第 3 项 Linux 侧已完成（目的地址 + UDP 路由探测 + 同接口 IPv6 绑定 + `manual/route/heuristic` 来源日志，统一语义与 Windows 方案见上方第 3 项说明），Windows 侧待做。第 1 项 Windows 侧待做。关联遗留：Windows 侧默认输出响应正文需按 §5.6 处理（不属于本阶段）。**Linux 侧本阶段 5 项全部完成并通过实机验证（v2.0.0）；Windows 侧 1-5 项待做。**
 
 ### 第三阶段：修平台生命周期
 
@@ -312,7 +316,7 @@ Linux 版本以 systemd 为唯一主要运行模型：
 3. Linux 只验证 systemd 服务路径、权限和信号退出；
 4. 不为两端强行统一不相同的生命周期。
 
-> 状态：第 3 项（Linux）无 root 部分验证已完成并全部通过（信号退出、退出码、工作目录、无临时文件/残留进程、unit 语法、权限模型，详见 `LOG.md`）；需 sudo 的实机 `systemctl start/stop/enable` 由机主执行。第 1、2 项为 Windows 侧，未开始。
+> 状态：第 3 项（Linux）已完成：无 root 部分（信号退出、退出码、工作目录、无临时文件/残留进程、unit 语法、权限模型）全部通过；实机 `systemctl start/stop/enable` 与长时运行由机主完成（v2.0.0，详见 `LOG.md`）。第 1、2 项为 Windows 侧，未开始。
 
 ### 第四阶段：补发布验证
 
@@ -321,6 +325,8 @@ Linux 版本以 systemd 为唯一主要运行模型：
 3. 验证配置错误返回 `78`；
 4. 用 `systemd-analyze verify` 验证 service 模板生成的最终 unit；
 5. 文档区分编译验证、离线验证和真实门户验证。
+
+> 状态：第 1 项两端编译命令记录于 `AGENTS.md`。Linux 侧：第 2 项 `--self-test` 离线检查（14 响应分类 + 5 地址断言，无需配置文件与网络），第 3 项配置错误返回 `78`（14 场景验证），第 4 项 `systemd-analyze verify` 通过，第 5 项 README/LOG.md 区分离线自检与实机验证。Windows 侧第 2、4 项待做。
 
 ## 9. 后续 agent 不应做的事
 

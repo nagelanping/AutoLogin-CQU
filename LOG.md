@@ -1,5 +1,17 @@
 # AutoLogin-CQU 修改日志
 
+## 2026-08-25: Linux 版本标记完成（v2.0.0）
+
+**状态**：机主在真实校园网环境完成 v2.0.0 实机验证，确认将整个 Linux 版本标记为完成。`AUDIT.md` 状态注记已同步更新（顶部现状 + 第二/三/四阶段）。
+
+**验证覆盖**（各条详见下方对应条目）：
+
+- 编译：`g++ -O2 -Wall -Wextra`，0 警告；
+- 离线：`--self-test` 19 项（14 响应分类 + 5 地址断言）全部通过，无需配置文件与网络；
+- 实机：真实门户登录保活（`login success` / `already online`）、`systemctl start/stop/enable`、`SIGTERM`/`SIGINT` 优雅退出、配置错误退出码 `78`、`systemd-analyze verify` 通过（实机与 sudo 部分由机主执行）。
+
+**剩余**：Windows 侧（第二阶段第 1-5 项、第三阶段第 1-2 项、第四阶段第 2、4 项）未开始。
+
 ## 2026-08-24: v2.0.0 交付前最后打磨——配置解析 `#` 修复 + 诊断日志/标签准确性
 
 **范围**：`src/linux/AutoLogin-CQU.cpp`。子代理完整代码逻辑审查（13 处 setopt 类型、RAII/生命周期、资源获取返回值、核心逻辑）结论**可交付、无 🔴**；对其列出的可打磨项做取舍后修 3 处：
@@ -163,6 +175,7 @@ sudo systemctl enable autologin-cqu                  # 开机自启
 5. 移除 `TIMEOUT` 的过时描述「不保证限制系统 DNS 解析耗时」（DNS 现由 libcurl 内部处理，受 `TIMEOUT` 覆盖）
 
 **验证**：与代码行为逐项核对（`CURLOPT_SSL_VERIFYPEER/VERIFYHOST`、`CURLOPT_CAINFO`、exit 78 路径、`config.yaml` 字段）
+
 ## 2025-01-12: Linux TLS 校验恢复 + SERVER_IP 连接语义修正
 
 **范围**：`src/linux/AutoLogin-CQU.cpp`, `src/linux/config.yaml`
