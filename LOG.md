@@ -1,5 +1,17 @@
 # AutoLogin-CQU 修改日志
 
+## 2026-08-24: v2.0.0 交付前最后打磨——配置解析 `#` 修复 + 诊断日志/标签准确性
+
+**范围**：`src/linux/AutoLogin-CQU.cpp`。子代理完整代码逻辑审查（13 处 setopt 类型、RAII/生命周期、资源获取返回值、核心逻辑）结论**可交付、无 🔴**；对其列出的可打磨项做取舍后修 3 处：
+
+1. **配置解析 `#` 截断修复（🟡，正确性）**：`StripInlineComment` 原把任何位置的 `#` 当注释截断，违反 YAML 规范（`#` 仅在行首或前导空白时才起注释）。后果：真实密码含 `#`（如 `a#b`）被静默截断成 `a` → 每 20s 登录失败且难排查。修法：`#` 仅在 `i==0 || isspace(前一字符)` 时截断。独立小程序验证 7 用例全对（`a#b`→`a#b`、`a # c`→`a`、引号内 `#` 保护、尾部注释等）。
+2. **DNS 失败诊断日志（🟢→修）**：`ResolvePortalDestination` 在 `getaddrinfo` 失败时原静默返回 false 回退启发式；现记 `warning: DNS resolution of login.cqu.edu.cn failed; falling back to heuristic address`。仅 DNS 真坏时触发，非常态噪音。
+3. **地址标签准确性（🟢→修）**：v6 路由但同接口无 IPv4 的回退分支，上报 IPv4 实为启发式取值，原标 `route` 误导排障；现标 `route-v4-fallback` 并在函数注释中定义。self-test 不断言该标签，改动安全。
+
+**跳过（评估后不值得）**：setopt/sigaction/close 返回值未检查（惯例，失败经 perform 暴露，加检查只增噪音）；WriteCallback 传完整 body 再截断（子代理建议维持现状，"传完+(truncated)"语义更清晰）。
+
+**验证**：`-Wall -Wextra` 0 警告；`--self-test` 全过；正常路径无回归（v4 路由仍标 route）；SERVER_IP 崩溃回归 3/3 无崩；含 `#` 密码配置被接受且正常启动。
+
 ## 2026-08-24: v2.0.0 生产级测试版打磨——修复 SERVER_IP 段错误 + 可观测性
 
 **范围**：`src/linux/AutoLogin-CQU.cpp`。目标：交付 v2.0.0 生产级测试版二进制。

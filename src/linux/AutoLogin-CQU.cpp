@@ -110,7 +110,7 @@ string StripInlineComment(const string &value)
             inSingleQuote = !inSingleQuote;
         else if (c == '"' && !inSingleQuote)
             inDoubleQuote = !inDoubleQuote;
-        else if (c == '#' && !inSingleQuote && !inDoubleQuote)
+        else if (c == '#' && !inSingleQuote && !inDoubleQuote && (i == 0 || isspace(static_cast<unsigned char>(value[i - 1]))))
             return value.substr(0, i);
     }
 
@@ -561,7 +561,10 @@ bool ResolvePortalDestination(const Config &cfg, string &destIp)
 
     struct addrinfo *result = NULL;
     if (getaddrinfo(LOGIN_HOST.c_str(), NULL, &hints, &result) != 0 || result == NULL)
+    {
+        cerr << "autologin-cqu: warning: DNS resolution of " << LOGIN_HOST << " failed; falling back to heuristic address" << endl;
         return false;
+    }
     unique_ptr<struct addrinfo, decltype(&freeaddrinfo)> guard(result, freeaddrinfo);
 
     char ip[INET6_ADDRSTRLEN];
@@ -695,6 +698,7 @@ bool GetOtherFamilyOnInterface(const string &addr, int wantedFamily, string &out
 }
 
 // 地址选择：manual = LOGIN_IP 显式指定；route = 按到认证服务器的路由选定源地址；
+// route-v4-fallback = 探测到 v6 路由但同接口无可用 IPv4，上报 IPv4 退回启发式；
 // heuristic = 接口/网段启发式兜底。语义与 Windows 版一致（见 AUDIT.md 第二阶段第 3 项）。
 bool GetLoginAddresses(const Config &cfg, string &loginIpv4, string &ipv6, string &addressSource)
 {
@@ -738,7 +742,7 @@ bool GetLoginAddresses(const Config &cfg, string &loginIpv4, string &ipv6, strin
                 return false;
             }
             loginIpv4 = fallbackIpv4;
-            addressSource = "route";
+            addressSource = "route-v4-fallback";
             return true;
         }
     }
