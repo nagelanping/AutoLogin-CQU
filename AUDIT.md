@@ -4,7 +4,7 @@
 
 > Python 版本不再维护；请勿查看或改动其归档内容。
 >
-> **现状（2026-08-25）**：Linux 版本（`src/linux/`）已完成——四个阶段的 Linux 侧项全部完成并通过实机验证（v2.0.0，详见 `LOG.md`）。Windows 侧（`src/windows/`）未开始，按第二、三、四阶段推进。
+> **现状（按端细分）**：Linux 端（`src/linux/`）已完成——四个阶段的 Linux 侧项全部完成并通过实机验证（v2.0.0，详见 `LOG.md`）。Windows 端（`src/windows/`）逐项状态：第一阶段 5 项中 4 项已完成（TLS 严格校验、默认域名目标、`SERVER_IP` 钉解析、自定义信任来源按平台限制定为系统信任库），仅剩第 5 项响应门控未开始；第二阶段第 2 项（响应分类）双端已完成，第 1 项（配置校验）大部分完成、仅剩 `CHECK_INTERVAL` 范围对齐缺口，第 3、4、5 项未开始；第三阶段第 1、2 项代码层面已改进（commit cf3a6b0），项级验证未做；第四阶段第 2 项（Windows 离线检查）未做。详见各阶段状态注记。
 
 ## 1. 产品定位：先不要改错目标
 
@@ -76,10 +76,10 @@ Linux 服务适配层                         Windows 服务核心
 
 ### 4.1 TLS 校验：自定义证书不是错误，但关闭全部校验是风险
 
-校园网门户可能使用不公开的自签名证书或内部 CA。这不意味着必须使用公网 CA，也不能直接把该证书判定为错误。当前真正的问题是 Linux、Windows 都关闭了证书校验：
+校园网门户可能使用不公开的自签名证书或内部 CA。这不意味着必须使用公网 CA，也不能直接把该证书判定为错误。历史版本中 Linux、Windows 都关闭了证书校验：
 
-- Linux 设置 `CURLOPT_SSL_VERIFYPEER = 0` 和 `CURLOPT_SSL_VERIFYHOST = 0`；
-- Windows 忽略未知 CA、域名不匹配和证书过期。
+- Linux 曾设置 `CURLOPT_SSL_VERIFYPEER = 0` 和 `CURLOPT_SSL_VERIFYHOST = 0`（已修复，恢复严格校验，`CA_BUNDLE` 提供自定义信任来源）；
+- Windows 曾忽略未知 CA、域名不匹配和证书过期（已修复，移除 `WINHTTP_OPTION_SECURITY_FLAGS` 三个 ignore 标志）。Windows 端不支持自定义 CA 文件：WinHTTP 没有替换系统信任库的公开选项（`WINHTTP_OPTION_SSL_CERT_STORE` 不存在，经 SDK 头文件与官方 option-flags 文档核实），内部 CA 须安装到系统信任库（`certmgr.msc` → 受信任的根证书颁发机构）。
 
 后续修改必须遵循：
 
@@ -109,7 +109,7 @@ TLS SNI：login.cqu.edu.cn
 HTTP Host：login.cqu.edu.cn
 ```
 
-Linux 应优先使用 libcurl 的 `CURLOPT_RESOLVE` 或等价能力。Windows 应使用能够保留逻辑主机名和 TLS 主机名的等价方案；不要仅靠“连接 IP + 手动 Host 头”假设 SNI 一定正确。
+Linux 应优先使用 libcurl 的 `CURLOPT_RESOLVE` 或等价能力。Windows 应使用能够保留逻辑主机名和 TLS 主机名的等价方案；不要仅靠“连接 IP + 手动 Host 头”假设 SNI 一定正确。（已实现：Linux 用 `CURLOPT_RESOLVE`；Windows 用 `WINHTTP_OPTION_RESOLUTION_HOSTNAME`（165，Win10 21H1+，钉 DNS 解析到 IP 字面量，SNI/Host 仍为域名），旧系统 SetOption 失败时回退“IP 直连 + 手动 Host 头”并打印警告，IPv6 `SERVER_IP` 直接走该回退。）
 
 ### 4.3 代理绕过是功能选择，不要擅自改成代理模式
 
@@ -275,7 +275,7 @@ Linux 版本以 systemd 为唯一主要运行模型：
 4. 将 `SERVER_IP` 改成“域名逻辑主机名 + 固定实际连接地址”的高级模式；
 5. 默认停止输出完整响应和 URL。
 
-> 状态：以上 5 项均已完成（commit f691b06，含 `CA_BUNDLE` 配置项与 `CURLOPT_RESOLVE` 语义，详见 `LOG.md`）。
+> 状态（按端细分）：**Linux 端 5 项均已完成**（commit f691b06，含 `CA_BUNDLE` 配置项与 `CURLOPT_RESOLVE` 语义，详见 `LOG.md`）。**Windows 端 5 项中 4 项已完成**：① TLS 严格校验已恢复（移除 `WINHTTP_OPTION_SECURITY_FLAGS` 三个 ignore 标志，commit d618da1）；② 自定义信任来源——Windows 端不支持 `CA_BUNDLE`：WinHTTP 无替换系统信任库的公开选项（`WINHTTP_OPTION_SSL_CERT_STORE` 不存在），决定采用系统信任库，`CA_BUNDLE` 配置键在 Windows 端报错并提示用 certmgr 安装内部 CA（与 Linux 不对等，属平台能力限制，见 §4.1）；③ 默认域名目标已实现（逻辑主机名恒为域名，commit 3f8e17b）；④ `SERVER_IP` 高级模式已实现（`WINHTTP_OPTION_RESOLUTION_HOSTNAME` 钉解析，旧系统/IPv6 回退 IP 直连 + 手动 Host 头并告警）。**未开始**：⑤ `LogLoginResult` 默认输出响应正文（`TruncateForLog` 截断 200 字符），未做调试选项门控（对应 §5.6）。
 >
 ### 第二阶段：统一协议行为
 
@@ -300,14 +300,24 @@ Linux 版本以 systemd 为唯一主要运行模型：
 
 **第 3 项 Windows 修改方案**（待 Windows 会话实施，逻辑须与 Linux 逐条对应）：
 
-1. 目的地址：现有 `GetPortalAddress` 已实现“`SERVER_IP` 优先 + `ResolveHostToIP`（IPv4 优先、IPv6 回退）”，直接改造或内联其逻辑，不要新建第二个同职责函数。
+1. 目的地址：现有 `PortalTarget`/`GetPortalTarget` 已实现“`SERVER_IP` 优先（IPv4 钉解析 / IPv6 回退 IP 直连）+ 域名连接”，在其基础上扩展，不要新建第二个同职责函数。
 2. 新增 `ProbeRouteSource(destIp, srcIp)`：按目的地址族建 UDP socket（`WSASocket` 或 `socket`，`SOCK_DGRAM`），`connect()` 到 `<dest>:<LOGIN_PORT>`，`getsockname()` + `getnameinfo(NI_NUMERICHOST)` 得源地址；失败返回 false。
 3. 新增 `GetSameInterfaceAddress(addr, wantedFamily, out)`：遍历 `GetAdaptersAddresses` 的各 adapter，先定位包含 `addr` 的 adapter，再取该 adapter 上另一地址族的首个地址（v6 排除 `fe80::`/`::`）。
 4. 改造 `PerformLogin` 内（非 `main`）的地址选择为 manual/route/heuristic 三级：`LOGIN_IP` 非空 → manual（同接口 v6 取不到退回 `GetLocalIPs` 的 v6）；否则探测成功按映射规则；探测失败退回现有 `GetLocalIPs`（保留其接口类型 + 网段优先级，作为 heuristic 兜底），随后 v6 按“所选 v4 同接口全局 v6，取不到保留 `GetLocalIPs` 的 v6”覆盖，与 Linux 一致。
 5. 日志：三条结果行 `[成功] 登录成功` / `[成功] 设备已在线` / `[失败] 登录失败`（`LogLoginResult` 需扩签名接收 source）追加 `(route|manual|heuristic)`；`使用配置的登录 IP` 行现在在 `PerformLogin` 内每周期打印，保持不变。
 6. 不改动 `ContainsJsonIntField`/`ClassifyLoginResponse`（第 2 项已统一）；不引入新依赖。
 
-> 状态：第 1、4 项 Linux 侧已完成（`Config` 结构替换全局配置；未知键/重复键/非法行/非法数值/超范围/模板占位符/IP 格式/CA_BUNDLE 不可读均报错 exit 78，`CHECK_INTERVAL` 范围 5-3600、`TIMEOUT` 范围 1-300）。第 2、5 项已完成：以 Windows 既有严格读取实现 `ContainsJsonIntField` 为基准移植到 Linux，两端 `ClassifyLoginResponse` 分类规则逐字节一致；`./AutoLogin-CQU --self-test` 提供 14 例离线分类自检，失败退出 1。第 3 项 Linux 侧已完成（目的地址 + UDP 路由探测 + 同接口 IPv6 绑定 + `manual/route/heuristic` 来源日志，统一语义与 Windows 方案见上方第 3 项说明），Windows 侧待做。第 1 项 Windows 侧待做。关联遗留：Windows 侧默认输出响应正文需按 §5.6 处理（不属于本阶段）。**Linux 侧本阶段 5 项全部完成并通过实机验证（v2.0.0）；Windows 侧 1-5 项待做。**
+> 状态（按端细分，逐项）：
+>
+> - 第 1 项配置校验：**Linux 端完成**（未知键/重复键/非法行/非法数值/超范围/模板占位符/IP 格式/CA_BUNDLE 不可读均报错 exit 78，`CHECK_INTERVAL` 范围 5-3600、`TIMEOUT` 范围 1-300）。**Windows 端大部分完成**：未知键/重复键/空键/缺 `:`/模板占位符/IP 格式/数值超范围均带行号报错并返回 exit 78（`CA_BUNDLE` 键按 Windows 平台能力限制不支持并给出专用提示，见第一阶段第 2 项）；**剩余**：`CHECK_INTERVAL` 范围 Windows 允许 1-86400（Linux 要求 5-3600）。
+> - 第 2 项响应分类：**双端已完成**。以 Windows 既有严格读取 `ContainsJsonIntField` 为基准移植到 Linux，两端 `ClassifyLoginResponse` 分类规则逐字节一致。
+> - 第 3 项 IPv4/IPv6 与 `LOGIN_IP`：**Linux 端完成**（目的地址 + UDP 路由探测 + 同接口 IPv6 绑定 + `manual/route/heuristic` 来源日志，统一语义与 Windows 方案见上方第 3 项说明）。**Windows 端未开始**。
+> - 第 4 项 `Config` 结构：**Linux 端完成**（`Config` 值结构替换全局配置）。**Windows 端未开始**（`USER_ACCOUNT`/`USER_PASSWORD`/`SERVER_IP`/`LOGIN_IP`/`CHECK_INTERVAL_MS`/`TIMEOUT_MS` 仍为全局变量）。
+> - 第 5 项离线响应分类检查：**Linux 端完成**（`--self-test` 19 例离线自检：14 分类 + 5 地址断言，失败退出 1，不读配置不触网）。**Windows 端未开始**（无 `--self-test`）。
+>
+> 关联遗留：Windows 端默认输出响应正文属于第一阶段第 5 项，不属于本阶段。
+>
+> **汇总：Linux 端 5 项全部完成并通过实机验证（v2.0.0）。Windows 端仅第 2 项完成（作为基准端）；第 1 项剩余范围/键对齐，第 3、4、5 项待做。**
 
 ### 第三阶段：修平台生命周期
 
@@ -316,7 +326,7 @@ Linux 版本以 systemd 为唯一主要运行模型：
 3. Linux 只验证 systemd 服务路径、权限和信号退出；
 4. 不为两端强行统一不相同的生命周期。
 
-> 状态：第 3 项（Linux）已完成：无 root 部分（信号退出、退出码、工作目录、无临时文件/残留进程、unit 语法、权限模型）全部通过；实机 `systemctl start/stop/enable` 与长时运行由机主完成（v2.0.0，详见 `LOG.md`）。第 1、2 项为 Windows 侧，未开始。
+> 状态：第 3 项（Linux）已完成：无 root 部分（信号退出、退出码、工作目录、无临时文件/残留进程、unit 语法、权限模型）全部通过；实机 `systemctl start/stop/enable` 与长时运行由机主完成（v2.0.0，详见 `LOG.md`）。第 1、2 项（Windows 端）：代码层面已改进（commit cf3a6b0）——前台控制层（托盘/快捷键/窗口监控线程）只操作事件与原子标志，不接触 `hSession`（满足 §6.2 边界要求）；清理时先 `SetEvent(g_hExitEvent)` 再 `PostMessage(WM_APP_EXIT/WM_QUIT)`，全部线程 `WaitForSingleObject(INFINITE)` 等待结束后再关闭事件句柄；`CreateThread` 部分失败时告警降级、不影响核心登录循环；§6.3 指出的“只等待 500ms/1000ms 超时后强关句柄”风险已不在当前代码中（`main` cleanup 全为 INFINITE 等待，HTTP 句柄由 `ScopedWinHttp` RAII 在主作用域内先行释放）。**项级验证（长时运行退出、部分线程创建失败场景、Windows Terminal 场景）未做，不计为完成。**
 
 ### 第四阶段：补发布验证
 
@@ -326,7 +336,7 @@ Linux 版本以 systemd 为唯一主要运行模型：
 4. 用 `systemd-analyze verify` 验证 service 模板生成的最终 unit；
 5. 文档区分编译验证、离线验证和真实门户验证。
 
-> 状态：第 1 项两端编译命令记录于 `AGENTS.md`。Linux 侧：第 2 项 `--self-test` 离线检查（14 响应分类 + 5 地址断言，无需配置文件与网络），第 3 项配置错误返回 `78`（14 场景验证），第 4 项 `systemd-analyze verify` 通过，第 5 项 README/LOG.md 区分离线自检与实机验证。Windows 侧第 2、4 项待做。
+> 状态：第 1 项双端完成（两端实际编译命令记录于 `AGENTS.md`）。第 2 项离线检查：**Linux 端完成**（`--self-test` 19 例，无需配置文件与网络）；**Windows 端未开始**（无 `--self-test`）。第 3 项配置错误返回 78：**Linux 端完成**（14 场景逐项验证）；**Windows 端已实现**（`CONFIG_ERROR_EXIT_CODE=78`，各错误路径均返回），场景化验证未记录。第 4 项 `systemd-analyze verify`：仅适用 Linux 端，**Linux 端完成**（此前“Windows 侧第 4 项待做”的说法有误，systemd 与 Windows 无关）。第 5 项文档区分离线/实机验证：双端完成（README/LOG.md）。
 
 ## 9. 后续 agent 不应做的事
 

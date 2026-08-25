@@ -1,5 +1,19 @@
 # AutoLogin-CQU 修改日志
 
+## 2026-08-25: Windows 第一阶段推进——TLS 严格校验 + 连接语义重构 + CA_BUNDLE 定为不支持
+
+**范围**：`src/windows/AutoLogin-CQU.cpp`、`AUDIT.md`。Windows 端第一阶段 5 项中完成 4 项（①③④②-变体），与 Linux v2.0.0 连接/安全语义对齐：
+
+1. **TLS 严格校验（第一阶段第 1 项）**：移除 `WINHTTP_OPTION_SECURITY_FLAGS` 的 `IGNORE_UNKNOWN_CA` / `IGNORE_CERT_CN_INVALID` / `IGNORE_CERT_DATE_INVALID` 三个标志，WinHTTP 默认校验 CA 链、主机名与有效期（commit d618da1）。
+2. **连接语义重构（第一阶段第 3、4 项）**：删除“先 `ResolveHostToIP` 解析为 IP 再 `WinHttpConnect(IP)`”的旧模型（SNI 为 IP），改为 `PortalTarget`：逻辑主机名恒为域名 `login.cqu.edu.cn`；`SERVER_IP` 非空且为 IPv4 时用 `WINHTTP_OPTION_RESOLUTION_HOSTNAME`（165，Win10 21H1+）把 DNS 解析钉到该 IP，SNI/Host/证书校验仍为域名；旧系统 SetOption 失败或 `SERVER_IP` 为 IPv6 时回退“IP 直连 + 手动 Host 头”并打印警告（SNI 非域名，可能登录失败）。
+3. **`CA_BUNDLE` 决策：Windows 端不支持**：调研证实 WinHTTP 没有替换系统信任库的公开选项——`WINHTTP_OPTION_SSL_CERT_STORE` 在 SDK 头文件与官方 option-flags 文档中均不存在；此前代码使用的选项编号 45 实为 `WINHTTP_OPTION_CONTEXT_VALUE`，对 TLS 校验毫无作用。机主决策：移除 Windows 端 `CA_BUNDLE` 配置键，配置出现该键时报错并提示“内部 CA 请安装到系统信任库（certmgr.msc）”，信任来源 = 系统信任库（与 Linux `CA_BUNDLE` 不对等，属平台能力限制，已写入 `AUDIT.md` §4.1）。
+4. **实证验证**（本机 + 本地自签 TLS 服务器 127.0.0.1:802 + 真实门户）：
+   - 钉解析生效：`SERVER_IP: 127.0.0.1` 时连接确实打到本地服务器（服务端日志确认），SNI 保持 `login.cqu.edu.cn`；自签证书被严格校验拒绝（错误码 12175 `SEC_E_CERT_UNKNOWN`）；
+   - 无 `SERVER_IP` 时走真实门户：TLS 握手成功，登录走通（测试账号得到门户业务响应）；
+   - `CA_BUNDLE` 键出现 → 专用错误提示 + exit 78；非法 `SERVER_IP` → exit 78；IPv6 `SERVER_IP` → 回退警告按预期打印。
+5. **文档同步**：`AUDIT.md` 顶部现状、第一阶段/第二阶段状态注记、§4.1/§4.2 语义说明更新为按端细分的最新状态；`LOG.md` 08-25 条目同步。
+**剩余（Windows 第一阶段第 5 项）**：`LogLoginResult` 响应正文门控（`DEBUG_RESPONSE` 类调试选项，对应 §5.6）。
+
 ## 2026-08-25: Linux 版本标记完成（v2.0.0）
 
 **状态**：机主在真实校园网环境完成 v2.0.0 实机验证，确认将整个 Linux 版本标记为完成。`AUDIT.md` 状态注记已同步更新（顶部现状 + 第二/三/四阶段）。
@@ -10,7 +24,7 @@
 - 离线：`--self-test` 19 项（14 响应分类 + 5 地址断言）全部通过，无需配置文件与网络；
 - 实机：真实门户登录保活（`login success` / `already online`）、`systemctl start/stop/enable`、`SIGTERM`/`SIGINT` 优雅退出、配置错误退出码 `78`、`systemd-analyze verify` 通过（实机与 sudo 部分由机主执行）。
 
-**剩余**：Windows 侧（第二阶段第 1-5 项、第三阶段第 1-2 项、第四阶段第 2、4 项）未开始。
+**剩余**（后记：原为“Windows 侧第二/三/四阶段多项未开始”，已按 AUDIT.md 按端细分修正）：Windows 端——第一阶段 5 项未开始；第二阶段第 1 项仅剩范围/键对齐、第 3/4/5 项未开始（第 2 项双端已完成）；第三阶段第 1/2 项代码已改进（cf3a6b0）但项级验证未做；第四阶段第 2 项未做。详见 `AUDIT.md` 各阶段状态注记。
 
 ## 2026-08-24: v2.0.0 交付前最后打磨——配置解析 `#` 修复 + 诊断日志/标签准确性
 
