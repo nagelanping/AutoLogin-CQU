@@ -3,3 +3,4 @@ release/
 *.code-workspace
 src/linux/AutoLogin-CQU
 src/windows/AutoLogin-CQU.exe
+src/windows/run_*.txt

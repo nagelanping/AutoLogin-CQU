@@ -2,9 +2,11 @@
 
 本文是给后续 agent 的实施顺序和边界说明。修改前先读本文件、`README.md`和 `linux_systemd-setup.md`。
 
+> **归档说明（2026-08-26）**：本文件与同目录 `LOG.md` 记录 v1.x.x → v2.0.0 的改进计划与执行过程，已完成使命并移入 `archive/dev-log/v1-to-v2/`。以下状态注记为归档时的终局快照；后续版本的维护以仓库根目录 `AGENTS.md` 为准。
+
 > Python 版本不再维护；请勿查看或改动其归档内容。
 >
-> **现状（按端细分）**：Linux 端（`src/linux/`）已完成——四个阶段的 Linux 侧项全部完成并通过实机验证（v2.0.0，详见 `LOG.md`）。Windows 端（`src/windows/`）逐项状态：第一阶段 5 项全部完成（TLS 严格校验、默认域名目标、`SERVER_IP` 钉解析、自定义信任来源按平台限制定为系统信任库、`DEBUG_RESPONSE` 响应门控）；第二阶段 5 项全部完成（配置校验含 `CHECK_INTERVAL` 5-3600 范围对齐、响应分类、IPv4/IPv6 路由探测与 `LOGIN_IP` 语义、`Config` 值结构替换全局变量、`--self-test` 离线自检 19 例）；第三阶段第 1、2 项代码层面已改进（commit cf3a6b0），项级验证未做；第四阶段第 2 项（Windows 离线检查）未做。详见各阶段状态注记。
+> **现状（按端细分，2026-08-26 终局）**：Linux 端（`src/linux/`）已完成——四个阶段的 Linux 侧项全部完成并通过实机验证（v2.0.0，详见同目录 `LOG.md`）。Windows 端（`src/windows/`）逐项状态：第一阶段 5 项全部完成（TLS 严格校验、默认域名目标、`SERVER_IP` 钉解析、自定义信任来源按平台限制定为系统信任库、`DEBUG_RESPONSE` 响应门控）；第二阶段 5 项全部完成（配置校验含 `CHECK_INTERVAL` 5-3600 范围对齐、响应分类、IPv4/IPv6 路由探测与 `LOGIN_IP` 语义、`Config` 值结构替换全局变量、`--self-test` 离线自检 19 例）；第三阶段第 1、2 项代码层面已改进（commit cf3a6b0）并通过交付前全量安全扫描（无阻断级缺陷，防御性加固 51ba374），项级验证未做；第四阶段 5 项全部完成（第 2 项 Windows `--self-test` 与 Linux 逐条一致，第 3 项 Windows 五类配置错误场景验证通过）。另：Windows 端错误退出暂停（双击启动时非零退出等待回车，78b365e/3b0742f）不属于四阶段范围，为交付体验修复。详见各阶段状态注记。
 
 ## 1. 产品定位：先不要改错目标
 
@@ -276,7 +278,7 @@ Linux 版本以 systemd 为唯一主要运行模型：
 5. 默认停止输出完整响应和 URL。
 
 > 状态（按端细分）：**Linux 端 5 项均已完成**（commit f691b06，含 `CA_BUNDLE` 配置项与 `CURLOPT_RESOLVE` 语义，详见 `LOG.md`）。**Windows 端 5 项均已完成**：① TLS 严格校验已恢复（移除 `WINHTTP_OPTION_SECURITY_FLAGS` 三个 ignore 标志，commit d618da1）；② 自定义信任来源——Windows 端不支持 `CA_BUNDLE`：WinHTTP 无替换系统信任库的公开选项（`WINHTTP_OPTION_SSL_CERT_STORE` 不存在），决定采用系统信任库，`CA_BUNDLE` 配置键在 Windows 端报错并提示用 certmgr 安装内部 CA（与 Linux 不对等，属平台能力限制，见 §4.1）；③ 默认域名目标已实现（逻辑主机名恒为域名，commit 3f8e17b）；④ `SERVER_IP` 高级模式已实现（`WINHTTP_OPTION_RESOLUTION_HOSTNAME` 钉解析，旧系统/IPv6 回退 IP 直连 + 手动 Host 头并告警）；⑤ 响应正文门控已实现（`DEBUG_RESPONSE` 配置键，默认不输出响应正文，`true` 时输出截断 200 字符的正文，§5.6；Linux 端默认仅输出响应字节数，无调试选项，双端不对等项以 Windows 更完整）。
->
+
 ### 第二阶段：统一协议行为
 
 1. 统一两端配置字段和校验规则；
@@ -298,7 +300,7 @@ Linux 版本以 systemd 为唯一主要运行模型：
 - **原则**：不得仅因存在某个非链路本地 IPv6 就认定其可用于认证——自动模式（route/heuristic）下上报的 IPv6 必须绑定到实际通往认证服务器的接口，或留空；manual 兜底（LOGIN_IP 定位不到接口时取首个全局 v6）是用户显式指定路径的既有行为，NAT 场景常见。
 - **已知限制**：`SERVER_IP` 为空时目的地址取首个 IPv4（或唯一存在的族），探测反映的是 v4 路由；libcurl 双栈（Happy Eyeballs）实际可能走 v6 路由。单网卡时 v4/v6 源通常同接口，影响可忽略；多网卡且门户按源 IP 校验失配时，再改为按族分别探测取对。
 
-**第 3 项 Windows 修改方案**（待 Windows 会话实施，逻辑须与 Linux 逐条对应）：
+**第 3 项 Windows 修改方案**（已实施，commit c6a5f21，2026-08-25，逻辑与 Linux 逐条对应）：
 
 1. 目的地址：现有 `PortalTarget`/`GetPortalTarget` 已实现“`SERVER_IP` 优先（IPv4 钉解析 / IPv6 回退 IP 直连）+ 域名连接”，在其基础上扩展，不要新建第二个同职责函数。
 2. 新增 `ProbeRouteSource(destIp, srcIp)`：按目的地址族建 UDP socket（`WSASocket` 或 `socket`，`SOCK_DGRAM`），`connect()` 到 `<dest>:<LOGIN_PORT>`，`getsockname()` + `getnameinfo(NI_NUMERICHOST)` 得源地址；失败返回 false。
@@ -326,7 +328,7 @@ Linux 版本以 systemd 为唯一主要运行模型：
 3. Linux 只验证 systemd 服务路径、权限和信号退出；
 4. 不为两端强行统一不相同的生命周期。
 
-> 状态：第 3 项（Linux）已完成：无 root 部分（信号退出、退出码、工作目录、无临时文件/残留进程、unit 语法、权限模型）全部通过；实机 `systemctl start/stop/enable` 与长时运行由机主完成（v2.0.0，详见 `LOG.md`）。第 1、2 项（Windows 端）：代码层面已改进（commit cf3a6b0）——前台控制层（托盘/快捷键/窗口监控线程）只操作事件与原子标志，不接触 `hSession`（满足 §6.2 边界要求）；清理时先 `SetEvent(g_hExitEvent)` 再 `PostMessage(WM_APP_EXIT/WM_QUIT)`，全部线程 `WaitForSingleObject(INFINITE)` 等待结束后再关闭事件句柄；`CreateThread` 部分失败时告警降级、不影响核心登录循环；§6.3 指出的“只等待 500ms/1000ms 超时后强关句柄”风险已不在当前代码中（`main` cleanup 全为 INFINITE 等待，HTTP 句柄由 `ScopedWinHttp` RAII 在主作用域内先行释放）。**项级验证（长时运行退出、部分线程创建失败场景、Windows Terminal 场景）未做，不计为完成。**
+> 状态：第 3 项（Linux）已完成：无 root 部分（信号退出、退出码、工作目录、无临时文件/残留进程、unit 语法、权限模型）全部通过；实机 `systemctl start/stop/enable` 与长时运行由机主完成（v2.0.0，详见 `LOG.md`）。第 1、2 项（Windows 端）：代码层面已改进（commit cf3a6b0）——前台控制层（托盘/快捷键/窗口监控线程）只操作事件与原子标志，不接触 `hSession`（满足 §6.2 边界要求）；清理时先 `SetEvent(g_hExitEvent)` 再 `PostMessage(WM_APP_EXIT/WM_QUIT)`，全部线程 `WaitForSingleObject(INFINITE)` 等待结束后再关闭事件句柄；`CreateThread` 部分失败时告警降级、不影响核心登录循环；§6.3 指出的“只等待 500ms/1000ms 超时后强关句柄”风险已不在当前代码中（`main` cleanup 全为 INFINITE 等待，HTTP 句柄由 `ScopedWinHttp` RAII 在主作用域内先行释放）。2026-08-25 交付前全量安全扫描（子代理全量内存安全扫描 + 3 类 soak 共约 120s）确认清理顺序与句柄生命周期无阻断级缺陷（详见 `LOG.md`）。**项级验证（长时运行退出、部分线程创建失败场景、Windows Terminal 场景）未做，不计为完成。**
 
 ### 第四阶段：补发布验证
 
@@ -336,7 +338,7 @@ Linux 版本以 systemd 为唯一主要运行模型：
 4. 用 `systemd-analyze verify` 验证 service 模板生成的最终 unit；
 5. 文档区分编译验证、离线验证和真实门户验证。
 
-> 状态：第 1 项双端完成（两端实际编译命令记录于 `AGENTS.md`）。第 2 项离线检查：**Linux 端完成**（`--self-test` 19 例，无需配置文件与网络）；**Windows 端未开始**（无 `--self-test`）。第 3 项配置错误返回 78：**Linux 端完成**（14 场景逐项验证）；**Windows 端已实现**（`CONFIG_ERROR_EXIT_CODE=78`，各错误路径均返回），场景化验证未记录。第 4 项 `systemd-analyze verify`：仅适用 Linux 端，**Linux 端完成**（此前“Windows 侧第 4 项待做”的说法有误，systemd 与 Windows 无关）。第 5 项文档区分离线/实机验证：双端完成（README/LOG.md）。
+> 状态：**双端 5 项全部完成（2026-08-26）**。第 1 项：两端实际编译命令记录于 `AGENTS.md`。第 2 项离线检查：Linux 端 `--self-test` 19 例（无需配置文件与网络）；Windows 端 19 例与 Linux 逐条一致（commit abbee74），`main` 首分支处理，不读配置不触网，成功退出 0、失败退出 1。第 3 项配置错误返回 78：Linux 端 14 场景逐项验证；Windows 端 `CONFIG_ERROR_EXIT_CODE=78`，五类配置错误（`CHECK_INTERVAL` 4/7200、`TIMEOUT` 0、`LOGIN_IP` 非法、`DEBUG_RESPONSE` 非法）场景验证均以 78 干净退出（`LOG.md` 08-25 条目）。第 4 项 `systemd-analyze verify`：仅适用 Linux 端，**Linux 端完成**（此前“Windows 侧第 4 项待做”的说法有误，systemd 与 Windows 无关）。第 5 项文档区分离线/实机验证：双端完成（README/LOG.md）。
 
 ## 9. 后续 agent 不应做的事
 

@@ -1,4 +1,14 @@
 # AutoLogin-CQU 修改日志
+
+## 2026-08-26: Windows 第二阶段收尾——错误退出暂停、交付验证与文档归档
+
+**范围**：`src/windows/AutoLogin-CQU.cpp`、`AUDIT.md`、`LOG.md`（后两者移入 `archive/dev-log/v1-to-v2/`）、`AGENTS.md`、`README.md`、`.gitignore`。
+
+1. **错误退出暂停（commit 78b365e + 3b0742f）**：双击启动时程序以非零码退出会一闪而过，机主无法看到报错。`main` 增加 `holdIfNeeded`：退出码非零且控制台为交互可见（stdin 为 `FILE_TYPE_CHAR` 且 `GetConsoleWindow` 窗口存在并可见）时打印"按回车键退出..."并等待回车。初版判据 `GetConsoleProcessList(NULL, 0) == 1` 实测为死代码（`nSize=0` 非法，恒返回 0 并置 `ERROR_INVALID_PARAMETER`），改用 FILE_TYPE/IsWindow/IsWindowVisible 三条件；隐藏控制台（任务计划"隐藏"级别）不会在不可见窗口里挂起。
+2. **验证**：远程 stdin 40ms 干净退出（exit 78）；隐藏控制台 48ms 干净退出；机主实机双击（Windows Terminal）窗口停住并显示"未配置有效账号或密码"报错，手动关闭正常；`--self-test` 19 例全过（exit 0）。至此 Windows 端第二、四阶段全部完成，第三阶段剩余项级验证（长时运行退出、部分线程创建失败、Windows Terminal 托盘场景）待真实桌面环境。
+3. **文档归档**：`AUDIT.md` 与 `LOG.md` 记录的是 v1.x.x → v2.0.0 的改进计划与执行过程，随本次移入 `archive/dev-log/v1-to-v2/`，归档前更新为终局状态（第四阶段 5 项全部完成、已落地方案标注完成）。`AGENTS.md`/`README.md` 继续在根目录随版本维护；源码中"见 AUDIT.md"的注释改为指向归档路径。
+4. **运行日志**：`src/windows/run_err.txt`、`run_test.txt` 为本地运行产生的日志转储，`.gitignore` 新增 `src/windows/run_*.txt`。
+
 ## 2026-08-25: 交付前全量安全扫描与防御性加固
 
 **范围**：`src/windows/AutoLogin-CQU.cpp` 全量（约 1530 行）。子代理全量内存安全扫描（裸指针/RAII 句柄生命周期/goto cleanup/长驻循环/编码转换/多线程/整数溢出）：无阻断级缺陷——`ScopedMalloc` 重分配链无泄漏，`WinHttpCloseHandle` 仅 RAII 内一处，`PerformLogin` 全部 return 路径经 RAII，`wsaStarted` 标志防 WSACleanup 失衡，无 `TerminateThread`，`SecondsToMilliseconds` 先 clamp 防 DWORD 溢出。
@@ -8,6 +18,7 @@
 **验证**：编译 0 错误；`--self-test` 19 例全过（exit 0）；持续发送失败 soak 45s 稳定不崩；真实门户 soak 42s 稳定（假凭据→认证失败循环，无崩溃）；5 类配置错误（`CHECK_INTERVAL` 4/7200、`TIMEOUT` 0、`LOGIN_IP` 非法、`DEBUG_RESPONSE` 非法）均以 78 干净退出。Ctrl+C 运行时注入在本无交互桌面的会话无法实测（`AllocConsole` 被拒），其信号路径不依赖代码。
 
 **交付物**：`src/windows/AutoLogin-CQU.exe`（commit 51ba374，MinGW 静态链接）。
+
 ## 2026-08-25: Windows 第二阶段第 5 项完成——`--self-test` 离线自检
 
 **范围**：`src/windows/AutoLogin-CQU.cpp`。`RunSelfTest()` 用例与 Linux 端逐条一致（19 例）：14 例响应分类（`ContainsJsonIntField` 严格读取：成功/已在线/失败/前缀不匹配/空响应/HTML 与代理错误页/截断场景）+ 5 项地址断言（`127.0.0.1` 与 `::1` 回环 UDP 探测、`SERVER_IP` 目的优先、同接口 `127.0.0.1`<->`::1` 双向查找）。`main` 签名改收 `argc/argv`，首分支处理 `--self-test`（不读配置、不触网、`RunSelfTest` 自带 `WSAStartup/WSACleanup`）：成功退出 0，任一失败退出 1 并打印 FAIL 行。
@@ -47,7 +58,7 @@
 1. 新增 `DEBUG_RESPONSE` 配置键（可选，默认 `false`）：`false` 时不输出响应正文，`true` 时在结果行后输出截断 200 字符的正文；
 2. 解析用 `TryGetConfigBool`，接受 `true`/`false`（大小写不敏感，兼容 `TRUE`/`FALSE`/`1`/`0`），其他值报错 exit 78；`config.yaml` 增加注释键 `DEBUG_RESPONSE: false`；
 3. 验证：编译 0 错误；默认配置输出无 `[响应]` 行；`DEBUG_RESPONSE: true` 时输出正文；非法值 `yes` → exit 78。
-**状态**：Windows 端第一阶段 5/5 完成。后续任务为第二阶段第 1/3/4/5 项与第三/四阶段（见 `AUDIT.md`）。
+   **状态**：Windows 端第一阶段 5/5 完成。后续任务为第二阶段第 1/3/4/5 项与第三/四阶段（见 `AUDIT.md`）。
 
 ## 2026-08-25: Windows 第一阶段推进——TLS 严格校验 + 连接语义重构 + CA_BUNDLE 定为不支持
 
@@ -61,7 +72,7 @@
    - 无 `SERVER_IP` 时走真实门户：TLS 握手成功，登录走通（测试账号得到门户业务响应）；
    - `CA_BUNDLE` 键出现 → 专用错误提示 + exit 78；非法 `SERVER_IP` → exit 78；IPv6 `SERVER_IP` → 回退警告按预期打印。
 5. **文档同步**：`AUDIT.md` 顶部现状、第一阶段/第二阶段状态注记、§4.1/§4.2 语义说明更新为按端细分的最新状态；`LOG.md` 08-25 条目同步。
-**剩余（Windows 第一阶段第 5 项）**：`LogLoginResult` 响应正文门控——见上方后续条目，已完成。
+   **剩余（Windows 第一阶段第 5 项）**：`LogLoginResult` 响应正文门控——见上方后续条目，已完成。
 
 ## 2026-08-25: Linux 版本标记完成（v2.0.0）
 

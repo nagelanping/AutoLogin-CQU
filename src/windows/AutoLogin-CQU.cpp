@@ -913,7 +913,7 @@ bool GetSameInterfaceAddress(const string &addr, int wantedFamily, string &out)
     return false;
 }
 
-// 地址选择（与 Linux 端语义一致，见 AUDIT.md 第二阶段第 3 项）：
+// 地址选择（与 Linux 端语义一致，见 archive/dev-log/v1-to-v2/AUDIT.md 第二阶段第 3 项）：
 // manual = LOGIN_IP 显式指定；route = 按到认证服务器的路由选定源地址；
 // route-v4-fallback = 探测到 v6 路由但同接口无可用 IPv4，上报 IPv4 退回启发式；
 // heuristic = 接口/网段启发式兜底（GetLocalIPs）。
@@ -1135,7 +1135,7 @@ LoginResult ClassifyLoginResponse(const string &response)
 }
 
 void LogLoginResult(const Config &cfg, LoginResult result, const string &loginIpv4,
-                       const string &addressSource, const string &response)
+                    const string &addressSource, const string &response)
 {
     switch (result)
     {
@@ -1191,7 +1191,7 @@ void PerformLogin(const Config &cfg, HINTERNET hSession)
         // 旧系统不支持该选项时回退为 IP 直连 + 手动 Host 头（SNI 非域名，可能校验失败）。
         wstring pin = ToWString(target.pinIP);
         if (!WinHttpSetOption(hRequest.get(), WINHTTP_OPTION_RESOLUTION_HOSTNAME,
-                                 (LPVOID)pin.c_str(), (DWORD)(pin.size() + 1) * sizeof(wchar_t)))
+                              (LPVOID)pin.c_str(), (DWORD)(pin.size() + 1) * sizeof(wchar_t)))
         {
             cerr << "[警告] 钉解析选项不受支持（Win10 21H1+，错误码 " << GetLastError
                  << "），回退为 IP 直连: " << target.pinIP << "（SNI 非域名，可能登录失败）" << endl;
@@ -1204,9 +1204,9 @@ void PerformLogin(const Config &cfg, HINTERNET hSession)
                 return;
             }
             hRequest = ScopedWinHttp(WinHttpOpenRequest(hConnect.get(), L"GET", fullPath.c_str(),
-                                                   NULL, WINHTTP_NO_REFERER,
-                                                   WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                                   WINHTTP_FLAG_SECURE));
+                                                        NULL, WINHTTP_NO_REFERER,
+                                                        WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                                        WINHTTP_FLAG_SECURE));
             if (!hRequest)
             {
                 cerr << "[错误] 回退直连创建请求失败: " << GetLastError() << endl;

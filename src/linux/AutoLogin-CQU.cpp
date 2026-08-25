@@ -541,7 +541,7 @@ bool GetLocalIPv6(string &ipv6)
 }
 
 // ================= 地址选择 =================
-// 第二阶段第 3 项：两端语义一致，见 AUDIT.md 第二阶段第 3 项
+// 第二阶段第 3 项：两端语义一致，见 archive/dev-log/v1-to-v2/AUDIT.md 第二阶段第 3 项
 
 // 门户目的 IP：SERVER_IP 优先（字面 IP），否则解析门户域名（IPv4 优先，其次 IPv6）
 bool ResolvePortalDestination(const Config &cfg, string &destIp)
@@ -697,7 +697,7 @@ bool GetOtherFamilyOnInterface(const string &addr, int wantedFamily, string &out
 
 // 地址选择：manual = LOGIN_IP 显式指定；route = 按到认证服务器的路由选定源地址；
 // route-v4-fallback = 探测到 v6 路由但同接口无可用 IPv4，上报 IPv4 退回启发式；
-// heuristic = 接口/网段启发式兜底。语义与 Windows 版一致（见 AUDIT.md 第二阶段第 3 项）。
+// heuristic = 接口/网段启发式兜底。语义与 Windows 版一致（见 archive/dev-log/v1-to-v2/AUDIT.md 第二阶段第 3 项）。
 bool GetLoginAddresses(const Config &cfg, string &loginIpv4, string &ipv6, string &addressSource)
 {
     ipv6.clear();

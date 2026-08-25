@@ -33,9 +33,9 @@ sudo chmod 640 /opt/autologin-cqu/config.yaml
 
 编辑 `autologin-cqu.service`，替换以下占位符：
 
-| 占位符 | 说明 | 推荐值 |
-| --- | --- | --- |
-| `<USERNAME>` | 运行服务的用户 | `autologin-cqu` |
+| 占位符            | 说明               | 推荐值                 |
+| ----------------- | ------------------ | ---------------------- |
+| `<USERNAME>`    | 运行服务的用户     | `autologin-cqu`      |
 | `<PROGRAM_DIR>` | 程序目录的绝对路径 | `/opt/autologin-cqu` |
 
 推荐配置如下：

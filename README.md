@@ -29,16 +29,15 @@
 2. 解压，**确保 `config.yaml` 与 `AutoLogin-CQU.exe` 在同一目录**
 3. 使用记事本编辑 ``config.yaml`` ，按照注释的提示**补全上网账号信息**
 4. 双击运行 `AutoLogin-CQU.exe`
+5. 双击运行 `AutoLogin-CQU.exe`
+   **Linux 用户:**
+6. 下载 `AutoLogin-CQU_Linux_CPP.tar.gz`
+7. 解压并赋予执行权限，**确保 `config.yaml` 与 `AutoLogin-CQU` 在同一目录**
+8. 编辑 ``config.yaml`` ，按照注释的提示**补全上网账号信息**
+9. 确认系统已安装 libcurl 运行库（Arch Linux 由 `curl` 包提供）
+10. 进入解压目录后运行 `./AutoLogin-CQU`（不推荐长期手动运行，建议配置 systemd 启动项，请参考 `linux_systemd-setup.md`）
 
-**Linux 用户:**
-
-1. 下载 `AutoLogin-CQU_Linux_CPP.tar.gz`
-2. 解压并赋予执行权限，**确保 `config.yaml` 与 `AutoLogin-CQU` 在同一目录**
-3. 编辑 ``config.yaml`` ，按照注释的提示**补全上网账号信息**
-4. 确认系统已安装 libcurl 运行库（Arch Linux 由 `curl` 包提供）
-5. 进入解压目录后运行 `./AutoLogin-CQU`（不推荐长期手动运行，建议配置 systemd 启动项，请参考 `linux_systemd-setup.md`）
-
-离线自检：`./AutoLogin-CQU --self-test` 在不读取配置文件、不访问网络的情况下校验响应分类与本机地址选择逻辑，全部通过时退出码为 `0`。可用于部署前确认二进制在目标系统可正常运行。
+离线自检：Linux 运行 `./AutoLogin-CQU --self-test`，Windows 运行 `AutoLogin-CQU.exe --self-test`。自检不读取配置文件、不访问网络，校验响应分类与本机地址选择逻辑（双端 19 例一致），全部通过时退出码为 `0`。可用于部署前确认二进制在目标系统可正常运行。
 
 ---
 
