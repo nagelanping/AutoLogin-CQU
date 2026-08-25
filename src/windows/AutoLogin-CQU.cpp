@@ -945,14 +945,7 @@ void PerformLogin(HINTERNET hSession)
         return;
     }
 
-    DWORD securityFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
-                          SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
-                          SECURITY_FLAG_IGNORE_CERT_DATE_INVALID;
-    if (!WinHttpSetOption(hRequest.get(), WINHTTP_OPTION_SECURITY_FLAGS, &securityFlags, sizeof(securityFlags)))
-    {
-        cerr << "[错误] 设置 TLS 证书选项失败: " << GetLastError() << endl;
-        return;
-    }
+    // TLS 严格校验：不设任何证书忽略标志，WinHTTP 默认校验 CA 链、CN 与有效期。
 
     DWORD disabledFeatures = WINHTTP_DISABLE_KEEP_ALIVE;
     if (!WinHttpSetOption(hRequest.get(), WINHTTP_OPTION_DISABLE_FEATURE, &disabledFeatures, sizeof(disabledFeatures)))
