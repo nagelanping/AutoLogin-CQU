@@ -1,5 +1,19 @@
 # AutoLogin-CQU 修改日志
 
+## 2026-08-25: Windows 第二阶段第 3 项完成——IPv4/IPv6 路由探测与 `LOGIN_IP` 语义
+
+**范围**：`src/windows/AutoLogin-CQU.cpp`。按 AUDIT 第 3 项修改方案落地，逻辑与 Linux 逐条对应：
+
+1. 目的地址：`PortalTarget` 扩展 `destIp`——`SERVER_IP` 非空直接用（IPv4/IPv6 字面），否则 `getaddrinfo` 解析门户域名（优先首个 IPv4，其次首个 IPv6），解析失败退回启发式并告警；
+2. `ProbeRouteSource`：按目的地址族建 UDP socket `connect()` 到 `<dest>:802`（不发包），`getsockname()` 取内核选定源地址；
+3. `GetSameInterfaceAddress`：`GetAdaptersAddresses` 先按接口（IfIndex）定位含目标地址的适配器，再取该适配器另一地址族首个地址（v6 排除 `fe80::`/`::`）；
+4. `GetLoginAddresses` 三级选择：`LOGIN_IP` 非空 → `manual`（同接口全局 v6，取不到退回 `GetLocalIPs` 的 v6）；否则探测得 IPv4 → `route`（同接口全局 v6，无则留空）；探测得全局 v6 → 同接口 v4，无则 v4 退回启发式（`route-v4-fallback`）；探测失败/无 `destIp` → `GetLocalIPs` 启发式（保留接口类型+网段优先级），v6 取所选 v4 同接口全局 v6；
+5. 三条结果行追加来源标签，如 `[失败] 登录失败 (IPv4: 10.x.x.x, route)`；`使用配置的登录 IP` 信息行保持每周期打印。
+
+**验证**：编译 0 错误；无 `SERVER_IP`/`LOGIN_IP` 时结果行显示 `(route)`（本机实际 IPv4）；`LOGIN_IP` 显式指定时显示 `(manual)` 并打印信息行；`SERVER_IP: 127.0.0.1` 钉解析与地址选择均正常（无本地 TLS 服务时发送失败提前返回，为既有行为）。
+
+**状态**：Windows 端第二阶段第 1、2、3、4 项完成；剩余第 5 项（`--self-test` 离线自检）。
+
 ## 2026-08-25: Windows 第二阶段第 1、4 项完成——`CHECK_INTERVAL` 范围对齐 + `Config` 值结构
 
 **范围**：`src/windows/AutoLogin-CQU.cpp`、`src/windows/config.yaml`。现实现：

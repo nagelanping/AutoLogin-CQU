@@ -758,7 +758,221 @@ struct PortalTarget
     string pinIP;         // 钉解析用的 IP 字面量（仅 IPv4 SERVER_IP 场景）
     bool pinResolution;   // 为 true 时用 RESOLUTION_HOSTNAME 钉住域名解析（IPv4），保留域名 SNI/主机名校验
     bool manualHost;      // 为 true 时连接目标是 IP，需手动添加 Host 头
+    string destIp;        // 路由探测目的地址（SERVER_IP，或解析域名的首个 IPv4/IPv6；失败为空）
 };
+
+// 解析门户域名取路由探测目的地址：优先首个 IPv4，其次首个 IPv6；失败返回空（退回启发式）
+string ResolvePortalDomainIp()
+{
+    struct addrinfo hints;
+    ZeroMemory(&hints, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    struct addrinfo *result = NULL;
+    if (getaddrinfo(LOGIN_HOST_UTF8.c_str(), NULL, &hints, &result) != 0 || result == NULL)
+    {
+        cerr << "[警告] 门户域名解析失败，退回启发式地址选择。" << endl;
+        return "";
+    }
+
+    string ip;
+    char host[NI_MAXHOST];
+    for (int pass = 0; pass < 2 && ip.empty(); ++pass)
+    {
+        for (struct addrinfo *p = result; p != NULL; p = p->ai_next)
+        {
+            if ((pass == 0 && p->ai_family != AF_INET) || (pass == 1 && p->ai_family != AF_INET6))
+                continue;
+            if (getnameinfo(p->ai_addr, p->ai_addrlen, host, NI_MAXHOST, NULL, 0, NI_NUMERICHOST) != 0)
+                continue;
+            ip = host;
+            break;
+        }
+    }
+    freeaddrinfo(result);
+    return ip;
+}
+
+// 用 UDP connect 探测到目的地址的路由源地址（不实际发送报文）
+bool ProbeRouteSource(const string &destIp, string &srcIp)
+{
+    sockaddr_storage dst;
+    ZeroMemory(&dst, sizeof(dst));
+    socklen_t dstLen;
+    int family;
+    IN_ADDR in4 = {0};
+    IN6_ADDR in6 = {0};
+    if (InetPtonA(AF_INET, destIp.c_str(), &in4) == 1)
+    {
+        family = AF_INET;
+        ((sockaddr_in *)&dst)->sin_family = family;
+        ((sockaddr_in *)&dst)->sin_port = htons(LOGIN_PORT);
+        ((sockaddr_in *)&dst)->sin_addr = in4;
+        dstLen = sizeof(sockaddr_in);
+    }
+    else if (InetPtonA(AF_INET6, destIp.c_str(), &in6) == 1)
+    {
+        family = AF_INET6;
+        ((sockaddr_in6 *)&dst)->sin6_family = family;
+        ((sockaddr_in6 *)&dst)->sin6_port = htons(LOGIN_PORT);
+        ((sockaddr_in6 *)&dst)->sin6_addr = in6;
+        dstLen = sizeof(sockaddr_in6);
+    }
+    else
+        return false;
+
+    SOCKET fd = socket(family, SOCK_DGRAM, 0);
+    if (fd == INVALID_SOCKET)
+        return false;
+
+    string ip;
+    sockaddr_storage src;
+    socklen_t srcLen = sizeof(src);
+    if (connect(fd, (sockaddr *)&dst, dstLen) == 0 &&
+        getsockname(fd, (sockaddr *)&src, &srcLen) == 0)
+    {
+        char host[NI_MAXHOST];
+        if (getnameinfo((sockaddr *)&src, srcLen, host, NI_MAXHOST, NULL, 0, NI_NUMERICHOST) == 0)
+            ip = host;
+    }
+    closesocket(fd);
+    srcIp = ip;
+    return !ip.empty();
+}
+
+// 找到包含 addr 的接口上另一地址族的第一个地址（v6 要求全局，排除链路本地/未指定）
+bool GetSameInterfaceAddress(const string &addr, int wantedFamily, string &out)
+{
+    out.clear();
+
+    ULONG outBufLen = 15000;
+    ScopedMalloc pAddresses(malloc(outBufLen));
+    if (GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_INCLUDE_PREFIX, NULL, (PIP_ADAPTER_ADDRESSES)pAddresses.get(), &outBufLen) == ERROR_BUFFER_OVERFLOW)
+        pAddresses.reset(malloc(outBufLen));
+    if (GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_INCLUDE_PREFIX, NULL, (PIP_ADAPTER_ADDRESSES)pAddresses.get(), &outBufLen) != NO_ERROR)
+        return false;
+
+    // 第一遍：定位包含 addr 的接口（不排除回环，与 Linux 一致）
+    DWORD ifIndex = 0;
+    for (PIP_ADAPTER_ADDRESSES pCurr = (PIP_ADAPTER_ADDRESSES)pAddresses.get(); pCurr != NULL && ifIndex == 0; pCurr = pCurr->Next)
+    {
+        for (PIP_ADAPTER_UNICAST_ADDRESS pUni = pCurr->FirstUnicastAddress; pUni != NULL; pUni = pUni->Next)
+        {
+            char ip[INET6_ADDRSTRLEN] = {0};
+            if (getnameinfo(pUni->Address.lpSockaddr, pUni->Address.iSockaddrLength, ip, sizeof(ip), NULL, 0, NI_NUMERICHOST) != 0)
+                continue;
+            string h = ip;
+            size_t pos = h.find('%');
+            if (pos != string::npos)
+                h = h.substr(0, pos);
+            if (h == addr)
+            {
+                ifIndex = pCurr->IfIndex;
+                break;
+            }
+        }
+    }
+    if (ifIndex == 0)
+        return false;
+
+    // 第二遍：取该接口上目标族的第一个地址
+    for (PIP_ADAPTER_ADDRESSES pCurr = (PIP_ADAPTER_ADDRESSES)pAddresses.get(); pCurr != NULL; pCurr = pCurr->Next)
+    {
+        if (pCurr->IfIndex != ifIndex)
+            continue;
+        for (PIP_ADAPTER_UNICAST_ADDRESS pUni = pCurr->FirstUnicastAddress; pUni != NULL; pUni = pUni->Next)
+        {
+            if (pUni->Address.lpSockaddr->sa_family != wantedFamily)
+                continue;
+            char ip[INET6_ADDRSTRLEN] = {0};
+            if (getnameinfo(pUni->Address.lpSockaddr, pUni->Address.iSockaddrLength, ip, sizeof(ip), NULL, 0, NI_NUMERICHOST) != 0)
+                continue;
+            string h = ip;
+            size_t pos = h.find('%');
+            if (pos != string::npos)
+                h = h.substr(0, pos);
+            if (wantedFamily == AF_INET6 && (strncmp(h.c_str(), "fe80", 4) == 0 || h == "::"))
+                continue;
+            out = h;
+            return true;
+        }
+    }
+    return false;
+}
+
+// 地址选择（与 Linux 端语义一致，见 AUDIT.md 第二阶段第 3 项）：
+// manual = LOGIN_IP 显式指定；route = 按到认证服务器的路由选定源地址；
+// route-v4-fallback = 探测到 v6 路由但同接口无可用 IPv4，上报 IPv4 退回启发式；
+// heuristic = 接口/网段启发式兜底（GetLocalIPs）。
+bool GetLoginAddresses(const Config &cfg, const PortalTarget &target,
+                       string &loginIpv4, string &ipv6, string &addressSource)
+{
+    ipv6.clear();
+
+    if (!cfg.loginIp.empty())
+    {
+        loginIpv4 = cfg.loginIp;
+        if (!GetSameInterfaceAddress(loginIpv4, AF_INET6, ipv6))
+        {
+            // 按 AUDIT 方案退回 GetLocalIPs 的 v6（接口类型+网段优先级）；与 Linux「第一接口首个全局 v6」在多网卡下可能不同
+            string v4, v6;
+            if (GetLocalIPs(v4, v6))
+                ipv6 = v6;
+        }
+        addressSource = "manual";
+        return true;
+    }
+
+    if (!target.destIp.empty())
+    {
+        string src;
+        if (ProbeRouteSource(target.destIp, src))
+        {
+            IN_ADDR in4 = {0};
+            if (InetPtonA(AF_INET, src.c_str(), &in4) == 1)
+            {
+                loginIpv4 = src;
+                GetSameInterfaceAddress(src, AF_INET6, ipv6);
+                addressSource = "route";
+                return true;
+            }
+            // 探测结果为 IPv6：必须为全局地址（非链路本地）
+            IN6_ADDR in6 = {0};
+            if (InetPtonA(AF_INET6, src.c_str(), &in6) == 1 && strncmp(src.c_str(), "fe80", 4) != 0)
+            {
+                ipv6 = src;
+                if (GetSameInterfaceAddress(src, AF_INET, loginIpv4))
+                {
+                    addressSource = "route";
+                    return true;
+                }
+                // 仅 v6 路由：IPv4 提交值退回启发式
+                string v4, v6;
+                if (!GetLocalIPs(v4, v6))
+                {
+                    cerr << "[错误] 无可用 IPv4 用于登录（仅 v6 路由）。" << endl;
+                    return false;
+                }
+                loginIpv4 = v4;
+                addressSource = "route-v4-fallback";
+                return true;
+            }
+        }
+    }
+
+    // 兜底：接口/网段启发式；上报 v6 优先取所选 v4 同接口的全局 v6
+    if (!GetLocalIPs(loginIpv4, ipv6))
+    {
+        cerr << "[错误] 无法获取本机 IPv4 地址。" << endl;
+        return false;
+    }
+    string sameIfaceV6;
+    if (GetSameInterfaceAddress(loginIpv4, AF_INET6, sameIfaceV6))
+        ipv6 = sameIfaceV6;
+    addressSource = "heuristic";
+    return true;
+}
 
 bool GetPortalTarget(const Config &cfg, PortalTarget &out)
 {
@@ -767,6 +981,7 @@ bool GetPortalTarget(const Config &cfg, PortalTarget &out)
         out.connectTarget = LOGIN_HOST_UTF8;
         out.pinResolution = false;
         out.manualHost = false;
+        out.destIp = ResolvePortalDomainIp();
         return true;
     }
 
@@ -777,6 +992,7 @@ bool GetPortalTarget(const Config &cfg, PortalTarget &out)
         out.pinIP = cfg.serverIp;
         out.pinResolution = true;
         out.manualHost = false;
+        out.destIp = cfg.serverIp;
         cout << "[信息] 使用配置钉住的服务器 IP: " << cfg.serverIp
              << "（逻辑主机名仍为 " << LOGIN_HOST_UTF8 << "）" << endl;
         return true;
@@ -785,6 +1001,7 @@ bool GetPortalTarget(const Config &cfg, PortalTarget &out)
     // IPv6 SERVER_IP：RESOLUTION_HOSTNAME 钉解析仅适用于 IPv4，回退为 IP 直连 + 手动 Host 头；
     // 此时 SNI 不是域名，若门户要求 SNI 或证书不含该 IP，登录可能失败。
     out.connectTarget = cfg.serverIp;
+    out.destIp = cfg.serverIp;
     out.pinResolution = false;
     out.manualHost = true;
     cout << "[警告] SERVER_IP 为 IPv6（" << cfg.serverIp
@@ -905,18 +1122,19 @@ LoginResult ClassifyLoginResponse(const string &response)
     return (alreadyOnline || welcomeOnline) ? LoginResult::AlreadyOnline : LoginResult::Failed;
 }
 
-void LogLoginResult(const Config &cfg, LoginResult result, const string &loginIpv4, const string &response)
+void LogLoginResult(const Config &cfg, LoginResult result, const string &loginIpv4,
+                       const string &addressSource, const string &response)
 {
     switch (result)
     {
     case LoginResult::Success:
-        cout << "[成功] 登录成功 (IPv4: " << loginIpv4 << ")" << endl;
+        cout << "[成功] 登录成功 (IPv4: " << loginIpv4 << ", " << addressSource << ")" << endl;
         break;
     case LoginResult::AlreadyOnline:
-        cout << "[成功] 设备已在线 (IPv4: " << loginIpv4 << ")" << endl;
+        cout << "[成功] 设备已在线 (IPv4: " << loginIpv4 << ", " << addressSource << ")" << endl;
         break;
     case LoginResult::Failed:
-        cout << "[失败] 登录失败 (IPv4: " << loginIpv4 << ")" << endl;
+        cout << "[失败] 登录失败 (IPv4: " << loginIpv4 << ", " << addressSource << ")" << endl;
         break;
     }
 
@@ -927,21 +1145,16 @@ void LogLoginResult(const Config &cfg, LoginResult result, const string &loginIp
 
 void PerformLogin(const Config &cfg, HINTERNET hSession)
 {
-    string ipv4, ipv6;
-    if (!GetLocalIPs(ipv4, ipv6))
-    {
-        cerr << "[错误] 无法获取本机 IPv4 地址。" << endl;
-        return;
-    }
-
-    string loginIpv4 = cfg.loginIp.empty() ? ipv4 : cfg.loginIp;
-    if (!cfg.loginIp.empty())
-        cout << "[信息] 使用配置的登录 IP: " << loginIpv4 << endl;
-
     PortalTarget target;
     if (!GetPortalTarget(cfg, target))
         return;
 
+    if (!cfg.loginIp.empty())
+        cout << "[信息] 使用配置的登录 IP: " << cfg.loginIp << endl;
+
+    string loginIpv4, ipv6, addressSource;
+    if (!GetLoginAddresses(cfg, target, loginIpv4, ipv6, addressSource))
+        return;
     ScopedWinHttp hConnect(WinHttpConnect(hSession, ToWString(target.connectTarget).c_str(), LOGIN_PORT, 0));
     if (!hConnect)
     {
@@ -1040,7 +1253,7 @@ void PerformLogin(const Config &cfg, HINTERNET hSession)
     if (!ReadResponseBody(hRequest.get(), response))
         return;
 
-    LogLoginResult(cfg, ClassifyLoginResponse(response), loginIpv4, response);
+    LogLoginResult(cfg, ClassifyLoginResponse(response), loginIpv4, addressSource, response);
 }
 
 int main()
