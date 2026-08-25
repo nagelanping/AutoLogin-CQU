@@ -1,5 +1,13 @@
 # AutoLogin-CQU 修改日志
+## 2026-08-25: 交付前全量安全扫描与防御性加固
 
+**范围**：`src/windows/AutoLogin-CQU.cpp` 全量（约 1530 行）。子代理全量内存安全扫描（裸指针/RAII 句柄生命周期/goto cleanup/长驻循环/编码转换/多线程/整数溢出）：无阻断级缺陷——`ScopedMalloc` 重分配链无泄漏，`WinHttpCloseHandle` 仅 RAII 内一处，`PerformLogin` 全部 return 路径经 RAII，`wsaStarted` 标志防 WSACleanup 失衡，无 `TerminateThread`，`SecondsToMilliseconds` 先 clamp 防 DWORD 溢出。
+
+**处置**：候选 🔴「键盘线程吞 Ctrl+C」经 MSDN《CTRL+C and CTRL+BREAK Signals》核对为误报——`ENABLE_PROCESSED_INPUT` 开启时 Ctrl+C 作为信号由控制台独立投递给全部挂接进程，不经过输入队列，`ConsoleHandler` 照常触发（该线程正是保持此模式）；已加语义注释说明。🟡 中两条一行项已修：`GetAdaptersAddresses` 分配失败空检查（两处）、接口查找 `ifIndex==0` 哨兵改 `BOOL found`。
+
+**验证**：编译 0 错误；`--self-test` 19 例全过（exit 0）；持续发送失败 soak 45s 稳定不崩；真实门户 soak 42s 稳定（假凭据→认证失败循环，无崩溃）；5 类配置错误（`CHECK_INTERVAL` 4/7200、`TIMEOUT` 0、`LOGIN_IP` 非法、`DEBUG_RESPONSE` 非法）均以 78 干净退出。Ctrl+C 运行时注入在本无交互桌面的会话无法实测（`AllocConsole` 被拒），其信号路径不依赖代码。
+
+**交付物**：`src/windows/AutoLogin-CQU.exe`（commit 51ba374，MinGW 静态链接）。
 ## 2026-08-25: Windows 第二阶段第 5 项完成——`--self-test` 离线自检
 
 **范围**：`src/windows/AutoLogin-CQU.cpp`。`RunSelfTest()` 用例与 Linux 端逐条一致（19 例）：14 例响应分类（`ContainsJsonIntField` 严格读取：成功/已在线/失败/前缀不匹配/空响应/HTML 与代理错误页/截断场景）+ 5 项地址断言（`127.0.0.1` 与 `::1` 回环 UDP 探测、`SERVER_IP` 目的优先、同接口 `127.0.0.1`<->`::1` 双向查找）。`main` 签名改收 `argc/argv`，首分支处理 `--self-test`（不读配置、不触网、`RunSelfTest` 自带 `WSAStartup/WSACleanup`）：成功退出 0，任一失败退出 1 并打印 FAIL 行。
