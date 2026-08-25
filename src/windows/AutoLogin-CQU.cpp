@@ -22,6 +22,7 @@
 #include <cstring>
 #include <cctype>
 #include <cstdlib>
+#include <cstdio>
 
 #ifndef WINHTTP_OPTION_DISABLE_FEATURE
 #define WINHTTP_OPTION_DISABLE_FEATURE 63
@@ -1358,14 +1359,27 @@ bool RunSelfTest()
 int main(int argc, char *argv[])
 {
     SetConsoleOutputCP(CP_UTF8);
+    // 本进程独占控制台（双击启动）且非离线自检时：出错或自检失败后暂停，
+    // 防止窗口一闪而过看不到报错；已有终端或无控制台环境不受影响
+    const bool holdOnError = GetConsoleProcessList(NULL, 0) == 1;
+    auto holdIfNeeded = [holdOnError](int code) -> int
+    {
+        if (code != 0 && holdOnError)
+        {
+            cout << "\n按回车键退出..." << endl;
+            while (getchar() != '\n')
+                ;
+        }
+        return code;
+    };
 
     // 离线自检（第二阶段第 5 项）：不需要配置文件和网络
     if (argc > 1 && strcmp(argv[1], "--self-test") == 0)
-        return RunSelfTest() ? 0 : 1;
+        return RunSelfTest() ? 0 : holdIfNeeded(1);
 
     Config config;
     if (!LoadConfig(config))
-        return CONFIG_ERROR_EXIT_CODE;
+        return holdIfNeeded(CONFIG_ERROR_EXIT_CODE);
 
     int exitCode = 0;
     bool wsaStarted = false;
@@ -1518,5 +1532,5 @@ cleanup:
 
     if (exitCode == 0)
         cout << "程序已安全结束。" << endl;
-    return exitCode;
+    return holdIfNeeded(exitCode);
 }
