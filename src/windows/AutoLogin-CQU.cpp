@@ -31,15 +31,10 @@
 #define WINHTTP_DISABLE_KEEP_ALIVE 0x00000008
 #endif
 
-// 部分 MinGW 版本的 winhttp.h 缺少以下定义
-#ifndef WINHTTP_OPTION_RESOLUTION_CACHE
-#define WINHTTP_OPTION_RESOLUTION_CACHE 48
-typedef struct _WINHTTP_RESOLVED_CACHE_ENTRY
-{
-    DWORD dwTimeout;
-    DWORD AddressListSize;
-    IN_ADDR AddressList[1];
-} WINHTTP_RESOLVED_CACHE_ENTRY, *LPWINHTTP_RESOLVED_CACHE_ENTRY;
+// 部分 MinGW 版本的 winhttp.h 缺少此定义（Win10 21H1+）：
+/// 指定用于 DNS 解析的主机名，可为 IP 字面量；SNI/Host 仍为原域名
+#ifndef WINHTTP_OPTION_RESOLUTION_HOSTNAME
+#define WINHTTP_OPTION_RESOLUTION_HOSTNAME 165
 #endif
 
 // 编译指令: g++ <AutoLogin-CQU.cpp> -o <AutoLogin-CQU.exe> -lwinhttp -liphlpapi -lws2_32 -lshell32 -luser32 -static
@@ -61,7 +56,7 @@ const int CONFIG_ERROR_EXIT_CODE = 78;
 // ================= 全局配置变量 =================
 string USER_ACCOUNT;
 string USER_PASSWORD;
-string SERVER_IP; // 可选：直接指定服务器 IP，绕过 DNS 解析
+string SERVER_IP; // 可选：钉住域名解析到指定 IP（IPv4 直连钉，IPv6 回退 IP 直连）
 string LOGIN_IP;  // 可选：指定用于认证的客户端 IPv4，适用于路由器接入场景
 DWORD CHECK_INTERVAL_MS = DEFAULT_CHECK_INTERVAL_SECONDS * 1000;
 DWORD TIMEOUT_MS = DEFAULT_TIMEOUT_SECONDS * 1000;
@@ -139,7 +134,10 @@ bool LoadYamlConfig(const string &filename, map<string, string> &config)
         string key = Trim(trimmed.substr(0, delimiter));
         if (key.empty() || !IsSupportedConfigKey(key))
         {
-            cerr << "[错误] config.yaml 第 " << lineNumber << " 行包含未知或空配置项。" << endl;
+            if (key == "CA_BUNDLE")
+                cerr << "[错误] config.yaml 第 " << lineNumber << " 行：Windows 端不支持 CA_BUNDLE（WinHTTP 无自定义 CA 库选项），内部 CA 请安装到系统信任库（certmgr.msc）。" << endl;
+            else
+                cerr << "[错误] config.yaml 第 " << lineNumber << " 行包含未知或空配置项。" << endl;
             return false;
         }
         if (config.find(key) != config.end())
@@ -726,7 +724,8 @@ bool GetLocalIPs(string &ipv4, string &ipv6)
 struct PortalTarget
 {
     string connectTarget; // 传给 WinHttpConnect 的服务器名（域名，或回退模式下的 IP）
-    bool pinResolution;   // 为 true 时用 SERVER_IP 钉住域名解析（IPv4），保留域名 SNI/主机名校验
+    string pinIP;         // 钉解析用的 IP 字面量（仅 IPv4 SERVER_IP 场景）
+    bool pinResolution;   // 为 true 时用 RESOLUTION_HOSTNAME 钉住域名解析（IPv4），保留域名 SNI/主机名校验
     bool manualHost;      // 为 true 时连接目标是 IP，需手动添加 Host 头
 };
 
@@ -744,6 +743,7 @@ bool GetPortalTarget(PortalTarget &out)
     if (InetPtonA(AF_INET, SERVER_IP.c_str(), &addr) == 1)
     {
         out.connectTarget = LOGIN_HOST_UTF8;
+        out.pinIP = SERVER_IP;
         out.pinResolution = true;
         out.manualHost = false;
         cout << "[信息] 使用配置钉住的服务器 IP: " << SERVER_IP
@@ -751,7 +751,7 @@ bool GetPortalTarget(PortalTarget &out)
         return true;
     }
 
-    // IPv6 SERVER_IP：WinHTTP 解析缓存只支持 IPv4，回退为 IP 直连 + 手动 Host 头；
+    // IPv6 SERVER_IP：RESOLUTION_HOSTNAME 钉解析仅适用于 IPv4，回退为 IP 直连 + 手动 Host 头；
     // 此时 SNI 不是域名，若门户要求 SNI 或证书不含该 IP，登录可能失败。
     out.connectTarget = SERVER_IP;
     out.pinResolution = false;
@@ -928,25 +928,41 @@ void PerformLogin(HINTERNET hSession)
         return;
     }
 
+    if (target.pinResolution)
+    {
+        // RESOLUTION_HOSTNAME（Win10 21H1+）钉住域名解析到指定 IP，SNI/Host 仍为域名。
+        // 旧系统不支持该选项时回退为 IP 直连 + 手动 Host 头（SNI 非域名，可能校验失败）。
+        wstring pin = ToWString(target.pinIP);
+        if (!WinHttpSetOption(hRequest.get(), WINHTTP_OPTION_RESOLUTION_HOSTNAME,
+                                 (LPVOID)pin.c_str(), (DWORD)(pin.size() + 1) * sizeof(wchar_t)))
+        {
+            cerr << "[警告] 钉解析选项不受支持（Win10 21H1+，错误码 " << GetLastError
+                 << "），回退为 IP 直连: " << target.pinIP << "（SNI 非域名，可能登录失败）" << endl;
+            hRequest.reset();
+            hConnect.reset();
+            hConnect = ScopedWinHttp(WinHttpConnect(hSession, ToWString(target.pinIP).c_str(), LOGIN_PORT, 0));
+            if (!hConnect)
+            {
+                cerr << "[错误] 回退直连建立连接失败 (" << target.pinIP << "): " << GetLastError() << endl;
+                return;
+            }
+            hRequest = ScopedWinHttp(WinHttpOpenRequest(hConnect.get(), L"GET", fullPath.c_str(),
+                                                   NULL, WINHTTP_NO_REFERER,
+                                                   WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                                   WINHTTP_FLAG_SECURE));
+            if (!hRequest)
+            {
+                cerr << "[错误] 回退直连创建请求失败: " << GetLastError() << endl;
+                return;
+            }
+            target.manualHost = true;
+        }
+    }
+
     // TLS 严格校验：不设任何证书忽略标志，WinHTTP 默认校验 CA 链、CN 与有效期。
     DWORD disabledFeatures = WINHTTP_DISABLE_KEEP_ALIVE;
     if (!WinHttpSetOption(hRequest.get(), WINHTTP_OPTION_DISABLE_FEATURE, &disabledFeatures, sizeof(disabledFeatures)))
         cerr << "[警告] 禁用 WinHTTP keep-alive 失败: " << GetLastError() << endl;
-
-    if (target.pinResolution)
-    {
-        WINHTTP_RESOLVED_CACHE_ENTRY pin;
-        ZeroMemory(&pin, sizeof(pin));
-        pin.dwTimeout = 60000;
-        pin.AddressListSize = 1;
-        InetPtonA(AF_INET, SERVER_IP.c_str(), &pin.AddressList[0]);
-        if (!WinHttpSetOption(hRequest.get(), WINHTTP_OPTION_RESOLUTION_CACHE, &pin, sizeof(pin)))
-        {
-            cerr << "[错误] 钉住服务器 IP (" << SERVER_IP << ") 失败: " << GetLastError() << endl;
-            return;
-        }
-    }
-
     // 回退模式连接目标是 IP，需手动补域名 Host 头；
     // 域名连接场景 WinHTTP 会自动添加 Host 头，无需重复。
     if (target.manualHost)
