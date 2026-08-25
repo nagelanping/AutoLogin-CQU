@@ -547,6 +547,9 @@ DWORD WINAPI KeyboardMonitorThread(LPVOID lpParam)
         {
             TogglePause();
         }
+        // 其余记录（含 Ctrl+C 信号记录）丢弃即可：ENABLE_PROCESSED_INPUT 保持开启时，
+        // Ctrl+C 由控制台作为信号独立投递给全部挂接进程（见 MSDN CTRL+C and CTRL+BREAK Signals），
+        // 不经过输入队列，ConsoleHandler 照常触发，无需回灌。
     }
 
     SetConsoleMode(hInput, oldMode);
@@ -684,6 +687,8 @@ bool GetLocalIPs(string &ipv4, string &ipv6)
         pAddresses.reset(malloc(outBufLen));
     }
 
+    if (!pAddresses.get())
+        return false;
     if (GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_INCLUDE_PREFIX, NULL, (PIP_ADAPTER_ADDRESSES)pAddresses.get(), &outBufLen) == NO_ERROR)
     {
         for (PIP_ADAPTER_ADDRESSES pCurr = (PIP_ADAPTER_ADDRESSES)pAddresses.get(); pCurr != NULL; pCurr = pCurr->Next)
@@ -849,13 +854,18 @@ bool GetSameInterfaceAddress(const string &addr, int wantedFamily, string &out)
     ULONG outBufLen = 15000;
     ScopedMalloc pAddresses(malloc(outBufLen));
     if (GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_INCLUDE_PREFIX, NULL, (PIP_ADAPTER_ADDRESSES)pAddresses.get(), &outBufLen) == ERROR_BUFFER_OVERFLOW)
+    {
         pAddresses.reset(malloc(outBufLen));
+    }
+    if (!pAddresses.get())
+        return false;
     if (GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_INCLUDE_PREFIX, NULL, (PIP_ADAPTER_ADDRESSES)pAddresses.get(), &outBufLen) != NO_ERROR)
         return false;
 
     // 第一遍：定位包含 addr 的接口（不排除回环，与 Linux 一致）
     DWORD ifIndex = 0;
-    for (PIP_ADAPTER_ADDRESSES pCurr = (PIP_ADAPTER_ADDRESSES)pAddresses.get(); pCurr != NULL && ifIndex == 0; pCurr = pCurr->Next)
+    BOOL found = FALSE;
+    for (PIP_ADAPTER_ADDRESSES pCurr = (PIP_ADAPTER_ADDRESSES)pAddresses.get(); pCurr != NULL && !found; pCurr = pCurr->Next)
     {
         for (PIP_ADAPTER_UNICAST_ADDRESS pUni = pCurr->FirstUnicastAddress; pUni != NULL; pUni = pUni->Next)
         {
@@ -869,11 +879,12 @@ bool GetSameInterfaceAddress(const string &addr, int wantedFamily, string &out)
             if (h == addr)
             {
                 ifIndex = pCurr->IfIndex;
+                found = TRUE;
                 break;
             }
         }
     }
-    if (ifIndex == 0)
+    if (!found)
         return false;
 
     // 第二遍：取该接口上目标族的第一个地址
