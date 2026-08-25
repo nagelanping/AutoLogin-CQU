@@ -1359,9 +1359,16 @@ bool RunSelfTest()
 int main(int argc, char *argv[])
 {
     SetConsoleOutputCP(CP_UTF8);
-    // 本进程独占控制台（双击启动）且非离线自检时：出错或自检失败后暂停，
-    // 防止窗口一闪而过看不到报错；已有终端或无控制台环境不受影响
-    const bool holdOnError = GetConsoleProcessList(NULL, 0) == 1;
+    // 出错时暂停等回车，防止双击启动窗口闪退看不到报错。
+    // 判据：stdin 是字符控制台（FILE_TYPE_CHAR）且控制台有可见窗口。
+    // 双击启动（conhost/Windows Terminal 均成立）→ 暂停；
+    // 从已有终端启动 → 多按一次回车，可接受；
+    // 管道/重定向/远程/无控制台（自动化、任务计划、服务）→ 不阻塞。
+    // 注意：GetConsoleProcessList 的 nSize=0 是非法参数（返回 0 + ERROR_INVALID_PARAMETER），不能用来判计数；
+    // IsWindowVisible 排除任务计划"隐藏"运行级别等不可见控制台（否则会在用户看不见的窗口里永远等回车）
+    HWND holdConsole = GetConsoleWindow();
+    const bool holdOnError = GetFileType(GetStdHandle(STD_INPUT_HANDLE)) == FILE_TYPE_CHAR &&
+                             holdConsole && IsWindow(holdConsole) && IsWindowVisible(holdConsole);
     auto holdIfNeeded = [holdOnError](int code) -> int
     {
         if (code != 0 && holdOnError)
