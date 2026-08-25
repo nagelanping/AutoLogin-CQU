@@ -17,3 +17,6 @@ CHECK_INTERVAL: 20
 
 # 请求超时时间（秒）
 TIMEOUT: 5
+
+# 调试输出（可选，true/false）：true 时在每次登录结果后输出响应正文（截断 200 字符），默认 false 不输出
+DEBUG_RESPONSE: false

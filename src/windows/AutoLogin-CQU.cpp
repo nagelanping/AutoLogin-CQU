@@ -60,6 +60,7 @@ string SERVER_IP; // 可选：钉住域名解析到指定 IP（IPv4 直连钉，
 string LOGIN_IP;  // 可选：指定用于认证的客户端 IPv4，适用于路由器接入场景
 DWORD CHECK_INTERVAL_MS = DEFAULT_CHECK_INTERVAL_SECONDS * 1000;
 DWORD TIMEOUT_MS = DEFAULT_TIMEOUT_SECONDS * 1000;
+bool DEBUG_RESPONSE = false; // 调试：true 时在结果行后输出响应正文（截断 200 字符），默认关闭
 
 string Trim(const string &str)
 {
@@ -106,7 +107,8 @@ bool IsSupportedConfigKey(const string &key)
 {
     return key == "STUDENT_ID" || key == "USER_PASSWORD" ||
            key == "SERVER_IP" || key == "LOGIN_IP" ||
-           key == "CHECK_INTERVAL" || key == "TIMEOUT";
+           key == "CHECK_INTERVAL" || key == "TIMEOUT" ||
+           key == "DEBUG_RESPONSE";
 }
 
 bool LoadYamlConfig(const string &filename, map<string, string> &config)
@@ -174,6 +176,24 @@ bool TryGetConfigSeconds(const map<string, string> &config, const string &key, D
     {
         return false;
     }
+}
+
+bool TryGetConfigBool(const map<string, string> &config, const string &key, bool defaultValue, bool &value)
+{
+    map<string, string>::const_iterator it = config.find(key);
+    if (it == config.end() || it->second.empty())
+    {
+        value = defaultValue;
+        return true;
+    }
+
+    if (it->second == "true" || it->second == "TRUE" || it->second == "1")
+        value = true;
+    else if (it->second == "false" || it->second == "FALSE" || it->second == "0")
+        value = false;
+    else
+        return false;
+    return true;
 }
 
 bool IsPlaceholderCredential(const string &value)
@@ -257,6 +277,13 @@ bool LoadConfig()
         cerr << "[错误] TIMEOUT 必须是 1 到 " << MAX_TIMEOUT_SECONDS << " 秒的正整数。" << endl;
         return false;
     }
+    bool debugResponse = false;
+    if (!TryGetConfigBool(config, "DEBUG_RESPONSE", false, debugResponse))
+    {
+        cerr << "[错误] DEBUG_RESPONSE 必须是 true 或 false。" << endl;
+        return false;
+    }
+    DEBUG_RESPONSE = debugResponse;
 
     USER_ACCOUNT = string(",0,") + studentId;
     CHECK_INTERVAL_MS = SecondsToMilliseconds(checkIntervalSeconds);
@@ -889,7 +916,8 @@ void LogLoginResult(LoginResult result, const string &loginIpv4, const string &r
         break;
     }
 
-    if (!response.empty())
+    // 响应正文默认不输出（§5.6 日志最小化），仅 DEBUG_RESPONSE=true 时输出截断后的正文。
+    if (DEBUG_RESPONSE && !response.empty())
         cout << "[响应] " << TruncateForLog(response) << endl;
 }
 

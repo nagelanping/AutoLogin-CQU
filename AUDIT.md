@@ -4,7 +4,7 @@
 
 > Python 版本不再维护；请勿查看或改动其归档内容。
 >
-> **现状（按端细分）**：Linux 端（`src/linux/`）已完成——四个阶段的 Linux 侧项全部完成并通过实机验证（v2.0.0，详见 `LOG.md`）。Windows 端（`src/windows/`）逐项状态：第一阶段 5 项中 4 项已完成（TLS 严格校验、默认域名目标、`SERVER_IP` 钉解析、自定义信任来源按平台限制定为系统信任库），仅剩第 5 项响应门控未开始；第二阶段第 2 项（响应分类）双端已完成，第 1 项（配置校验）大部分完成、仅剩 `CHECK_INTERVAL` 范围对齐缺口，第 3、4、5 项未开始；第三阶段第 1、2 项代码层面已改进（commit cf3a6b0），项级验证未做；第四阶段第 2 项（Windows 离线检查）未做。详见各阶段状态注记。
+> **现状（按端细分）**：Linux 端（`src/linux/`）已完成——四个阶段的 Linux 侧项全部完成并通过实机验证（v2.0.0，详见 `LOG.md`）。Windows 端（`src/windows/`）逐项状态：第一阶段 5 项全部完成（TLS 严格校验、默认域名目标、`SERVER_IP` 钉解析、自定义信任来源按平台限制定为系统信任库、`DEBUG_RESPONSE` 响应门控）；第二阶段第 2 项（响应分类）双端已完成，第 1 项（配置校验）大部分完成、仅剩 `CHECK_INTERVAL` 范围对齐缺口，第 3、4、5 项未开始；第三阶段第 1、2 项代码层面已改进（commit cf3a6b0），项级验证未做；第四阶段第 2 项（Windows 离线检查）未做。详见各阶段状态注记。
 
 ## 1. 产品定位：先不要改错目标
 
@@ -275,7 +275,7 @@ Linux 版本以 systemd 为唯一主要运行模型：
 4. 将 `SERVER_IP` 改成“域名逻辑主机名 + 固定实际连接地址”的高级模式；
 5. 默认停止输出完整响应和 URL。
 
-> 状态（按端细分）：**Linux 端 5 项均已完成**（commit f691b06，含 `CA_BUNDLE` 配置项与 `CURLOPT_RESOLVE` 语义，详见 `LOG.md`）。**Windows 端 5 项中 4 项已完成**：① TLS 严格校验已恢复（移除 `WINHTTP_OPTION_SECURITY_FLAGS` 三个 ignore 标志，commit d618da1）；② 自定义信任来源——Windows 端不支持 `CA_BUNDLE`：WinHTTP 无替换系统信任库的公开选项（`WINHTTP_OPTION_SSL_CERT_STORE` 不存在），决定采用系统信任库，`CA_BUNDLE` 配置键在 Windows 端报错并提示用 certmgr 安装内部 CA（与 Linux 不对等，属平台能力限制，见 §4.1）；③ 默认域名目标已实现（逻辑主机名恒为域名，commit 3f8e17b）；④ `SERVER_IP` 高级模式已实现（`WINHTTP_OPTION_RESOLUTION_HOSTNAME` 钉解析，旧系统/IPv6 回退 IP 直连 + 手动 Host 头并告警）。**未开始**：⑤ `LogLoginResult` 默认输出响应正文（`TruncateForLog` 截断 200 字符），未做调试选项门控（对应 §5.6）。
+> 状态（按端细分）：**Linux 端 5 项均已完成**（commit f691b06，含 `CA_BUNDLE` 配置项与 `CURLOPT_RESOLVE` 语义，详见 `LOG.md`）。**Windows 端 5 项均已完成**：① TLS 严格校验已恢复（移除 `WINHTTP_OPTION_SECURITY_FLAGS` 三个 ignore 标志，commit d618da1）；② 自定义信任来源——Windows 端不支持 `CA_BUNDLE`：WinHTTP 无替换系统信任库的公开选项（`WINHTTP_OPTION_SSL_CERT_STORE` 不存在），决定采用系统信任库，`CA_BUNDLE` 配置键在 Windows 端报错并提示用 certmgr 安装内部 CA（与 Linux 不对等，属平台能力限制，见 §4.1）；③ 默认域名目标已实现（逻辑主机名恒为域名，commit 3f8e17b）；④ `SERVER_IP` 高级模式已实现（`WINHTTP_OPTION_RESOLUTION_HOSTNAME` 钉解析，旧系统/IPv6 回退 IP 直连 + 手动 Host 头并告警）；⑤ 响应正文门控已实现（`DEBUG_RESPONSE` 配置键，默认不输出响应正文，`true` 时输出截断 200 字符的正文，§5.6；Linux 端默认仅输出响应字节数，无调试选项，双端不对等项以 Windows 更完整）。
 >
 ### 第二阶段：统一协议行为
 
@@ -315,7 +315,7 @@ Linux 版本以 systemd 为唯一主要运行模型：
 > - 第 4 项 `Config` 结构：**Linux 端完成**（`Config` 值结构替换全局配置）。**Windows 端未开始**（`USER_ACCOUNT`/`USER_PASSWORD`/`SERVER_IP`/`LOGIN_IP`/`CHECK_INTERVAL_MS`/`TIMEOUT_MS` 仍为全局变量）。
 > - 第 5 项离线响应分类检查：**Linux 端完成**（`--self-test` 19 例离线自检：14 分类 + 5 地址断言，失败退出 1，不读配置不触网）。**Windows 端未开始**（无 `--self-test`）。
 >
-> 关联遗留：Windows 端默认输出响应正文属于第一阶段第 5 项，不属于本阶段。
+> 关联遗留：Windows 端响应正文门控已完成（第一阶段第 5 项，`DEBUG_RESPONSE`）。
 >
 > **汇总：Linux 端 5 项全部完成并通过实机验证（v2.0.0）。Windows 端仅第 2 项完成（作为基准端）；第 1 项剩余范围/键对齐，第 3、4、5 项待做。**
 

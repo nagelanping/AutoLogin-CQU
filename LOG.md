@@ -1,5 +1,14 @@
 # AutoLogin-CQU 修改日志
 
+## 2026-08-25: Windows 第一阶段第 5 项完成——`DEBUG_RESPONSE` 响应正文门控
+
+**范围**：`src/windows/AutoLogin-CQU.cpp`、`src/windows/config.yaml`。AUDIT §5.6 要求日志默认最小化，详细响应仅经显式调试选项启用且限制长度。此前 `LogLoginResult` 无条件输出响应正文（截断 200 字符）。现实现：
+
+1. 新增 `DEBUG_RESPONSE` 配置键（可选，默认 `false`）：`false` 时不输出响应正文，`true` 时在结果行后输出截断 200 字符的正文；
+2. 解析用 `TryGetConfigBool`，接受 `true`/`false`（大小写不敏感，兼容 `TRUE`/`FALSE`/`1`/`0`），其他值报错 exit 78；`config.yaml` 增加注释键 `DEBUG_RESPONSE: false`；
+3. 验证：编译 0 错误；默认配置输出无 `[响应]` 行；`DEBUG_RESPONSE: true` 时输出正文；非法值 `yes` → exit 78。
+**状态**：Windows 端第一阶段 5/5 完成。后续任务为第二阶段第 1/3/4/5 项与第三/四阶段（见 `AUDIT.md`）。
+
 ## 2026-08-25: Windows 第一阶段推进——TLS 严格校验 + 连接语义重构 + CA_BUNDLE 定为不支持
 
 **范围**：`src/windows/AutoLogin-CQU.cpp`、`AUDIT.md`。Windows 端第一阶段 5 项中完成 4 项（①③④②-变体），与 Linux v2.0.0 连接/安全语义对齐：
@@ -12,7 +21,7 @@
    - 无 `SERVER_IP` 时走真实门户：TLS 握手成功，登录走通（测试账号得到门户业务响应）；
    - `CA_BUNDLE` 键出现 → 专用错误提示 + exit 78；非法 `SERVER_IP` → exit 78；IPv6 `SERVER_IP` → 回退警告按预期打印。
 5. **文档同步**：`AUDIT.md` 顶部现状、第一阶段/第二阶段状态注记、§4.1/§4.2 语义说明更新为按端细分的最新状态；`LOG.md` 08-25 条目同步。
-**剩余（Windows 第一阶段第 5 项）**：`LogLoginResult` 响应正文门控（`DEBUG_RESPONSE` 类调试选项，对应 §5.6）。
+**剩余（Windows 第一阶段第 5 项）**：`LogLoginResult` 响应正文门控——见上方后续条目，已完成。
 
 ## 2026-08-25: Linux 版本标记完成（v2.0.0）
 
