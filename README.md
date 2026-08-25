@@ -2,7 +2,7 @@
 
 校园网自动认证工具，定时向门户重发认证请求以保持登录状态，针对登录网页不弹出、登录网页异常、频繁掉登录状态等场景。提供 Windows 与 Linux 的 C++ 版本。
 
-- **Python 版本不再维护**
+- **Python 版本不再维护，已归档**
 
 ## **项目背景与设计理念**
 
@@ -12,8 +12,8 @@
 
 - **配置分离**：账号信息和常规设置与核心代码严格分离，配置文件独立于可运行文件
 - **多平台支持**：提供 Windows (.exe) 和 Linux 二进制可执行文件
-- **C++ 实现**：Windows 版基于 WinHTTP 系统 API，Linux 版依赖 libcurl
-- **运行模式**：Windows 版可把控制台隐藏到托盘（后台）或还原（前台）；Linux 版面向 systemd 后台服务，输出进入 systemd journal
+- **C++ 实现**：Windows 版基于 WinHTTP 系统 API，Linux 版依赖 libcurl，使用系统原生 API 实现远低于 python 版本的资源开销
+- **运行模式**：Windows 版可把控制台隐藏到托盘（后台）或还原（前台）（仅原版 cmd/powershell，安装 WindowsTerminal 后不生效）；Linux 版面向 systemd 后台服务设计，输出进入 systemd journal
 
 ---
 
@@ -28,14 +28,14 @@
 1. 下载 `AutoLogin-CQU_Windows_CPP.zip`
 2. 解压，**确保 `config.yaml` 与 `AutoLogin-CQU.exe` 在同一目录**
 3. 使用记事本编辑 ``config.yaml`` ，按照注释的提示**补全上网账号信息**
-4. 双击运行 `AutoLogin-CQU.exe`
-5. 双击运行 `AutoLogin-CQU.exe`
-   **Linux 用户:**
-6. 下载 `AutoLogin-CQU_Linux_CPP.tar.gz`
-7. 解压并赋予执行权限，**确保 `config.yaml` 与 `AutoLogin-CQU` 在同一目录**
-8. 编辑 ``config.yaml`` ，按照注释的提示**补全上网账号信息**
-9. 确认系统已安装 libcurl 运行库（Arch Linux 由 `curl` 包提供）
-10. 进入解压目录后运行 `./AutoLogin-CQU`（不推荐长期手动运行，建议配置 systemd 启动项，请参考 `linux_systemd-setup.md`）
+4. 双击运行 `AutoLogin-CQU.exe`；如需登录后无窗口后台自动运行，按 `windows-headless-setup.md` 配置任务计划程序
+
+**Linux 用户:**
+5. 下载 `AutoLogin-CQU_Linux_CPP.tar.gz`
+6. 解压并赋予执行权限，**确保 `config.yaml` 与 `AutoLogin-CQU` 在同一目录**
+7. 编辑 ``config.yaml`` ，按照注释的提示**补全上网账号信息**
+8. 确认系统已安装 libcurl 运行库（Arch Linux 由 `curl` 包提供）
+9. 进入解压目录后运行 `./AutoLogin-CQU`（不推荐长期手动运行，建议配置 systemd 启动项，请参考 `linux_systemd-setup.md`）
 
 离线自检：Linux 运行 `./AutoLogin-CQU --self-test`，Windows 运行 `AutoLogin-CQU.exe --self-test`。自检不读取配置文件、不访问网络，校验响应分类与本机地址选择逻辑（双端 19 例一致），全部通过时退出码为 `0`。可用于部署前确认二进制在目标系统可正常运行。
 

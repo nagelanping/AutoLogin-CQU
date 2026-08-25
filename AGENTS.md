@@ -6,13 +6,14 @@
 - The Python version is no longer maintained. Do not inspect or modify its archived contents.
 - Linux and Windows are separate implementations with separate `config.yaml` files; do not assume changes in one are shared by the other.
 - `src/linux/autologin-cqu.service` is a systemd template containing `<USERNAME>` and `<PROGRAM_DIR>` placeholders. The complete deployment procedure is in `linux_systemd-setup.md`.
+- `windows-headless-setup.md` is the step-by-step Task Scheduler guide for running the Windows build unattended (hidden window, start at logon). Update it if the Windows CLI or config keys change.
 
 ## Status
 
-- Linux 端完成（v2.0.0）：四阶段 Linux 侧项全部完成并通过实机验证。
-- Windows 端：第一阶段（连接与安全）与第二阶段（协议行为，含 `--self-test`）全部完成；第三阶段代码已改进并通过交付前安全扫描，项级验证（长时运行退出、部分线程创建失败、Windows Terminal 托盘场景）待真实桌面环境。
-- v1.x.x → v2.0.0 的改进计划与执行记录归档于 `archive/dev-log/v1-to-v2/`（AUDIT.md、LOG.md），为历史快照，不再更新；新问题的修复直接记录到新的日志文件中。
-- 双端不对等项（有意保留）：`CA_BUNDLE` 仅 Linux 支持（WinHTTP 无替换系统信任库的公开选项，内部 CA 装系统信任库）；`DEBUG_RESPONSE` 仅 Windows 支持。
+- Linux: feature-complete and verified on a real campus network deployment (v2).
+- Windows: aligned with Linux on connection/security semantics, config validation, response classification, address selection, and `--self-test`. Still to verify on a real desktop: long-run shutdown, partial thread-creation failure, tray behavior under Windows Terminal.
+- Intentional platform asymmetries: `CA_BUNDLE` is Linux-only (WinHTTP has no public option to replace the system trust store; install internal CAs via certmgr.msc); `DEBUG_RESPONSE` is Windows-only.
+- Historical audit and change log (v1 to v2) are read-only archives under `archive/dev-log/v1-to-v2/`. Record new work in fresh log files, not in the archives.
 
 ## Build and verification
 
