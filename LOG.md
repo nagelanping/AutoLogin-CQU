@@ -1,5 +1,15 @@
 # AutoLogin-CQU 修改日志
 
+## 2026-08-25: Windows 第二阶段第 1、4 项完成——`CHECK_INTERVAL` 范围对齐 + `Config` 值结构
+
+**范围**：`src/windows/AutoLogin-CQU.cpp`、`src/windows/config.yaml`。现实现：
+
+1. `Config` 值结构替换全部配置全局变量（原 `USER_ACCOUNT`/`USER_PASSWORD`/`SERVER_IP`/`LOGIN_IP`/`CHECK_INTERVAL_MS`/`TIMEOUT_MS`/`DEBUG_RESPONSE`）：字段与 Linux 端对齐（`studentId`/`password`/`serverIp`/`loginIp`/`checkIntervalSec`/`timeoutSec`，另加 Windows 扩展 `debugResponse`）；`LoadConfig(Config&)` 起按 `const Config &` 传递到 `GetPortalTarget`/`BuildLoginPath`/`LogLoginResult`/`PerformLogin`；删除 `USER_ACCOUNT` 全局，`,0,` 前缀在 `BuildLoginPath` 内拼接（与 Linux 一致）；
+2. `TryGetConfigSeconds` 增加下限校验，范围与 Linux 对齐：`CHECK_INTERVAL` 5-3600（原 1-86400）、`TIMEOUT` 1-300；`config.yaml` 注释补充范围说明；
+3. 验证：编译 0 错误；`CHECK_INTERVAL: 4` 与 `7200` 均报错 exit 78 并显示 `5 到 3600`；`SERVER_IP` 钉解析、`DEBUG_RESPONSE` 门控回归正常。
+
+**状态**：Windows 端第二阶段第 1、2、4 项完成；剩余第 3 项（IPv4/IPv6 路由探测与 `LOGIN_IP` 语义）与第 5 项（`--self-test` 离线自检）。
+
 ## 2026-08-25: Windows 第一阶段第 5 项完成——`DEBUG_RESPONSE` 响应正文门控
 
 **范围**：`src/windows/AutoLogin-CQU.cpp`、`src/windows/config.yaml`。AUDIT §5.6 要求日志默认最小化，详细响应仅经显式调试选项启用且限制长度。此前 `LogLoginResult` 无条件输出响应正文（截断 200 字符）。现实现：

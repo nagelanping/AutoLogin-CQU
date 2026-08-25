@@ -48,19 +48,25 @@ const int LOGIN_PORT = 802;
 const wstring LOGIN_PATH_BASE = L"/eportal/portal/login";
 const DWORD DEFAULT_CHECK_INTERVAL_SECONDS = 20;
 const DWORD DEFAULT_TIMEOUT_SECONDS = 5;
-const DWORD MAX_CHECK_INTERVAL_SECONDS = 86400;
+const DWORD MIN_TIMEOUT_SECONDS = 1;
+const DWORD MIN_CHECK_INTERVAL_SECONDS = 5;
+const DWORD MAX_CHECK_INTERVAL_SECONDS = 3600;
 const DWORD MAX_TIMEOUT_SECONDS = 300;
 const size_t MAX_RESPONSE_BYTES = 4096;
 const int CONFIG_ERROR_EXIT_CODE = 78;
 
-// ================= 全局配置变量 =================
-string USER_ACCOUNT;
-string USER_PASSWORD;
-string SERVER_IP; // 可选：钉住域名解析到指定 IP（IPv4 直连钉，IPv6 回退 IP 直连）
-string LOGIN_IP;  // 可选：指定用于认证的客户端 IPv4，适用于路由器接入场景
-DWORD CHECK_INTERVAL_MS = DEFAULT_CHECK_INTERVAL_SECONDS * 1000;
-DWORD TIMEOUT_MS = DEFAULT_TIMEOUT_SECONDS * 1000;
-bool DEBUG_RESPONSE = false; // 调试：true 时在结果行后输出响应正文（截断 200 字符），默认关闭
+// ================= 配置结构 =================
+// 与 Linux 端 Config 对齐（DEBUG_RESPONSE 为 Windows 端扩展项）
+struct Config
+{
+    string studentId;
+    string password;
+    string serverIp; // 可选：钉住域名解析到指定 IP（IPv4 钉解析，IPv6 回退 IP 直连）
+    string loginIp;  // 可选：提交给门户的客户端 IPv4，适用于路由器接入场景
+    DWORD checkIntervalSec = DEFAULT_CHECK_INTERVAL_SECONDS;
+    DWORD timeoutSec = DEFAULT_TIMEOUT_SECONDS;
+    bool debugResponse = false; // 调试：true 时输出截断 200 字符的响应正文，默认关闭
+};
 
 string Trim(const string &str)
 {
@@ -154,7 +160,7 @@ bool LoadYamlConfig(const string &filename, map<string, string> &config)
     return true;
 }
 
-bool TryGetConfigSeconds(const map<string, string> &config, const string &key, DWORD defaultValue, DWORD maxValue, DWORD &seconds)
+bool TryGetConfigSeconds(const map<string, string> &config, const string &key, DWORD defaultValue, DWORD minValue, DWORD maxValue, DWORD &seconds)
 {
     map<string, string>::const_iterator it = config.find(key);
     if (it == config.end() || it->second.empty())
@@ -167,7 +173,7 @@ bool TryGetConfigSeconds(const map<string, string> &config, const string &key, D
     {
         size_t parsedLength = 0;
         unsigned long value = stoul(it->second, &parsedLength, 10);
-        if (parsedLength != it->second.size() || value == 0 || value > maxValue)
+        if (parsedLength != it->second.size() || value < minValue || value > maxValue)
             return false;
         seconds = static_cast<DWORD>(value);
         return true;
@@ -219,7 +225,7 @@ bool IsValidIpAddress(const string &value, bool ipv4Only)
     return InetPtonA(AF_INET6, value.c_str(), &ipv6) == 1;
 }
 
-bool LoadConfig()
+bool LoadConfig(Config &cfg)
 {
     char exePath[MAX_PATH];
     DWORD pathLength = GetModuleFileNameA(NULL, exePath, MAX_PATH);
@@ -240,54 +246,52 @@ bool LoadConfig()
     }
 
     string studentId = config["STUDENT_ID"];
-    USER_PASSWORD = config["USER_PASSWORD"];
-    SERVER_IP = config["SERVER_IP"];
-    LOGIN_IP = config["LOGIN_IP"];
+    string password = config["USER_PASSWORD"];
+    string serverIp = config["SERVER_IP"];
+    string loginIp = config["LOGIN_IP"];
 
-    if (studentId.empty() || USER_PASSWORD.empty() ||
-        IsPlaceholderCredential(studentId) || IsPlaceholderCredential(USER_PASSWORD))
+    if (studentId.empty() || password.empty() ||
+        IsPlaceholderCredential(studentId) || IsPlaceholderCredential(password))
     {
         cerr << "[错误] 未配置有效账号或密码，请更新 config.yaml。" << endl;
         cerr << "配置文件路径: " << configPath << endl;
         return false;
     }
 
-    if (!SERVER_IP.empty() && !IsValidIpAddress(SERVER_IP, false))
+    if (!serverIp.empty() && !IsValidIpAddress(serverIp, false))
     {
         cerr << "[错误] SERVER_IP 必须是有效的 IPv4 或 IPv6 地址。" << endl;
         return false;
     }
-    if (!LOGIN_IP.empty() && !IsValidIpAddress(LOGIN_IP, true))
+    if (!loginIp.empty() && !IsValidIpAddress(loginIp, true))
     {
         cerr << "[错误] LOGIN_IP 必须是有效的 IPv4 地址。" << endl;
         return false;
     }
 
-    DWORD checkIntervalSeconds = 0;
-    DWORD timeoutSeconds = 0;
     if (!TryGetConfigSeconds(config, "CHECK_INTERVAL", DEFAULT_CHECK_INTERVAL_SECONDS,
-                             MAX_CHECK_INTERVAL_SECONDS, checkIntervalSeconds))
+                             MIN_CHECK_INTERVAL_SECONDS, MAX_CHECK_INTERVAL_SECONDS,
+                             cfg.checkIntervalSec))
     {
-        cerr << "[错误] CHECK_INTERVAL 必须是 1 到 " << MAX_CHECK_INTERVAL_SECONDS << " 秒的正整数。" << endl;
+        cerr << "[错误] CHECK_INTERVAL 必须是 " << MIN_CHECK_INTERVAL_SECONDS << " 到 " << MAX_CHECK_INTERVAL_SECONDS << " 秒的正整数。" << endl;
         return false;
     }
     if (!TryGetConfigSeconds(config, "TIMEOUT", DEFAULT_TIMEOUT_SECONDS,
-                             MAX_TIMEOUT_SECONDS, timeoutSeconds))
+                             MIN_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS, cfg.timeoutSec))
     {
-        cerr << "[错误] TIMEOUT 必须是 1 到 " << MAX_TIMEOUT_SECONDS << " 秒的正整数。" << endl;
+        cerr << "[错误] TIMEOUT 必须是 " << MIN_TIMEOUT_SECONDS << " 到 " << MAX_TIMEOUT_SECONDS << " 秒的正整数。" << endl;
         return false;
     }
-    bool debugResponse = false;
-    if (!TryGetConfigBool(config, "DEBUG_RESPONSE", false, debugResponse))
+    if (!TryGetConfigBool(config, "DEBUG_RESPONSE", false, cfg.debugResponse))
     {
         cerr << "[错误] DEBUG_RESPONSE 必须是 true 或 false。" << endl;
         return false;
     }
-    DEBUG_RESPONSE = debugResponse;
 
-    USER_ACCOUNT = string(",0,") + studentId;
-    CHECK_INTERVAL_MS = SecondsToMilliseconds(checkIntervalSeconds);
-    TIMEOUT_MS = SecondsToMilliseconds(timeoutSeconds);
+    cfg.studentId = studentId;
+    cfg.password = password;
+    cfg.serverIp = serverIp;
+    cfg.loginIp = loginIp;
 
     cout << "[信息] 已加载配置文件: " << configPath << endl;
     return true;
@@ -756,9 +760,9 @@ struct PortalTarget
     bool manualHost;      // 为 true 时连接目标是 IP，需手动添加 Host 头
 };
 
-bool GetPortalTarget(PortalTarget &out)
+bool GetPortalTarget(const Config &cfg, PortalTarget &out)
 {
-    if (SERVER_IP.empty())
+    if (cfg.serverIp.empty())
     {
         out.connectTarget = LOGIN_HOST_UTF8;
         out.pinResolution = false;
@@ -767,34 +771,34 @@ bool GetPortalTarget(PortalTarget &out)
     }
 
     IN_ADDR addr = {0};
-    if (InetPtonA(AF_INET, SERVER_IP.c_str(), &addr) == 1)
+    if (InetPtonA(AF_INET, cfg.serverIp.c_str(), &addr) == 1)
     {
         out.connectTarget = LOGIN_HOST_UTF8;
-        out.pinIP = SERVER_IP;
+        out.pinIP = cfg.serverIp;
         out.pinResolution = true;
         out.manualHost = false;
-        cout << "[信息] 使用配置钉住的服务器 IP: " << SERVER_IP
+        cout << "[信息] 使用配置钉住的服务器 IP: " << cfg.serverIp
              << "（逻辑主机名仍为 " << LOGIN_HOST_UTF8 << "）" << endl;
         return true;
     }
 
     // IPv6 SERVER_IP：RESOLUTION_HOSTNAME 钉解析仅适用于 IPv4，回退为 IP 直连 + 手动 Host 头；
     // 此时 SNI 不是域名，若门户要求 SNI 或证书不含该 IP，登录可能失败。
-    out.connectTarget = SERVER_IP;
+    out.connectTarget = cfg.serverIp;
     out.pinResolution = false;
     out.manualHost = true;
-    cout << "[警告] SERVER_IP 为 IPv6（" << SERVER_IP
+    cout << "[警告] SERVER_IP 为 IPv6（" << cfg.serverIp
          << "）：无法钉解析，回退为 IP 直连并手动添加 Host 头；SNI 不是域名，可能登录失败。" << endl;
     return true;
 }
 
-wstring BuildLoginPath(const string &loginIpv4, const string &ipv6)
+wstring BuildLoginPath(const Config &cfg, const string &loginIpv4, const string &ipv6)
 {
     stringstream ss;
     ss << "callback=dr1004"
        << "&login_method=1"
-       << "&user_account=" << UrlEncode(USER_ACCOUNT)
-       << "&user_password=" << UrlEncode(USER_PASSWORD)
+       << "&user_account=" << UrlEncode(",0," + cfg.studentId)
+       << "&user_password=" << UrlEncode(cfg.password)
        << "&wlan_user_ip=" << UrlEncode(loginIpv4)
        << "&wlan_user_ipv6=" << UrlEncode(ipv6)
        << "&wlan_user_mac=000000000000"
@@ -901,7 +905,7 @@ LoginResult ClassifyLoginResponse(const string &response)
     return (alreadyOnline || welcomeOnline) ? LoginResult::AlreadyOnline : LoginResult::Failed;
 }
 
-void LogLoginResult(LoginResult result, const string &loginIpv4, const string &response)
+void LogLoginResult(const Config &cfg, LoginResult result, const string &loginIpv4, const string &response)
 {
     switch (result)
     {
@@ -917,11 +921,11 @@ void LogLoginResult(LoginResult result, const string &loginIpv4, const string &r
     }
 
     // 响应正文默认不输出（§5.6 日志最小化），仅 DEBUG_RESPONSE=true 时输出截断后的正文。
-    if (DEBUG_RESPONSE && !response.empty())
+    if (cfg.debugResponse && !response.empty())
         cout << "[响应] " << TruncateForLog(response) << endl;
 }
 
-void PerformLogin(HINTERNET hSession)
+void PerformLogin(const Config &cfg, HINTERNET hSession)
 {
     string ipv4, ipv6;
     if (!GetLocalIPs(ipv4, ipv6))
@@ -930,12 +934,12 @@ void PerformLogin(HINTERNET hSession)
         return;
     }
 
-    string loginIpv4 = LOGIN_IP.empty() ? ipv4 : LOGIN_IP;
-    if (!LOGIN_IP.empty())
+    string loginIpv4 = cfg.loginIp.empty() ? ipv4 : cfg.loginIp;
+    if (!cfg.loginIp.empty())
         cout << "[信息] 使用配置的登录 IP: " << loginIpv4 << endl;
 
     PortalTarget target;
-    if (!GetPortalTarget(target))
+    if (!GetPortalTarget(cfg, target))
         return;
 
     ScopedWinHttp hConnect(WinHttpConnect(hSession, ToWString(target.connectTarget).c_str(), LOGIN_PORT, 0));
@@ -945,7 +949,7 @@ void PerformLogin(HINTERNET hSession)
         return;
     }
 
-    wstring fullPath = BuildLoginPath(loginIpv4, ipv6);
+    wstring fullPath = BuildLoginPath(cfg, loginIpv4, ipv6);
     ScopedWinHttp hRequest(WinHttpOpenRequest(hConnect.get(), L"GET", fullPath.c_str(),
                                               NULL, WINHTTP_NO_REFERER,
                                               WINHTTP_DEFAULT_ACCEPT_TYPES,
@@ -1036,14 +1040,15 @@ void PerformLogin(HINTERNET hSession)
     if (!ReadResponseBody(hRequest.get(), response))
         return;
 
-    LogLoginResult(ClassifyLoginResponse(response), loginIpv4, response);
+    LogLoginResult(cfg, ClassifyLoginResponse(response), loginIpv4, response);
 }
 
 int main()
 {
     SetConsoleOutputCP(CP_UTF8);
 
-    if (!LoadConfig())
+    Config config;
+    if (!LoadConfig(config))
         return CONFIG_ERROR_EXIT_CODE;
 
     int exitCode = 0;
@@ -1090,7 +1095,8 @@ int main()
             goto cleanup;
         }
 
-        if (!WinHttpSetTimeouts(hSession.get(), TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS, TIMEOUT_MS))
+        DWORD timeoutMs = SecondsToMilliseconds(config.timeoutSec);
+        if (!WinHttpSetTimeouts(hSession.get(), timeoutMs, timeoutMs, timeoutMs, timeoutMs))
             cerr << "[警告] 设置 WinHTTP 超时失败: " << GetLastError() << endl;
 
         if (IsWindowsTerminalSession())
@@ -1140,10 +1146,10 @@ int main()
         while (true)
         {
             if (!g_bPaused.load())
-                PerformLogin(hSession.get());
+                PerformLogin(config, hSession.get());
 
             HANDLE handles[] = {g_hExitEvent, g_hPauseEvent};
-            DWORD waitResult = WaitForMultipleObjects(2, handles, FALSE, CHECK_INTERVAL_MS);
+            DWORD waitResult = WaitForMultipleObjects(2, handles, FALSE, SecondsToMilliseconds(config.checkIntervalSec));
             if (waitResult == WAIT_OBJECT_0)
             {
                 cout << "\n正在退出..." << endl;

@@ -4,7 +4,7 @@
 
 > Python 版本不再维护；请勿查看或改动其归档内容。
 >
-> **现状（按端细分）**：Linux 端（`src/linux/`）已完成——四个阶段的 Linux 侧项全部完成并通过实机验证（v2.0.0，详见 `LOG.md`）。Windows 端（`src/windows/`）逐项状态：第一阶段 5 项全部完成（TLS 严格校验、默认域名目标、`SERVER_IP` 钉解析、自定义信任来源按平台限制定为系统信任库、`DEBUG_RESPONSE` 响应门控）；第二阶段第 2 项（响应分类）双端已完成，第 1 项（配置校验）大部分完成、仅剩 `CHECK_INTERVAL` 范围对齐缺口，第 3、4、5 项未开始；第三阶段第 1、2 项代码层面已改进（commit cf3a6b0），项级验证未做；第四阶段第 2 项（Windows 离线检查）未做。详见各阶段状态注记。
+> **现状（按端细分）**：Linux 端（`src/linux/`）已完成——四个阶段的 Linux 侧项全部完成并通过实机验证（v2.0.0，详见 `LOG.md`）。Windows 端（`src/windows/`）逐项状态：第一阶段 5 项全部完成（TLS 严格校验、默认域名目标、`SERVER_IP` 钉解析、自定义信任来源按平台限制定为系统信任库、`DEBUG_RESPONSE` 响应门控）；第二阶段第 1、2、4 项已完成（配置校验含 `CHECK_INTERVAL` 5-3600 范围对齐、响应分类、`Config` 值结构替换全局变量），第 3 项（IPv4/IPv6 路由探测与 `LOGIN_IP` 语义）、第 5 项（`--self-test` 离线自检）未开始；第三阶段第 1、2 项代码层面已改进（commit cf3a6b0），项级验证未做；第四阶段第 2 项（Windows 离线检查）未做。详见各阶段状态注记。
 
 ## 1. 产品定位：先不要改错目标
 
@@ -309,15 +309,15 @@ Linux 版本以 systemd 为唯一主要运行模型：
 
 > 状态（按端细分，逐项）：
 >
-> - 第 1 项配置校验：**Linux 端完成**（未知键/重复键/非法行/非法数值/超范围/模板占位符/IP 格式/CA_BUNDLE 不可读均报错 exit 78，`CHECK_INTERVAL` 范围 5-3600、`TIMEOUT` 范围 1-300）。**Windows 端大部分完成**：未知键/重复键/空键/缺 `:`/模板占位符/IP 格式/数值超范围均带行号报错并返回 exit 78（`CA_BUNDLE` 键按 Windows 平台能力限制不支持并给出专用提示，见第一阶段第 2 项）；**剩余**：`CHECK_INTERVAL` 范围 Windows 允许 1-86400（Linux 要求 5-3600）。
+> - 第 1 项配置校验：**双端已完成**。Linux：未知键/重复键/非法行/非法数值/超范围/模板占位符/IP 格式/CA_BUNDLE 不可读均报错 exit 78。Windows：未知键/重复键/空键/缺 `:`/模板占位符/IP 格式/数值超范围均带行号报错并返回 exit 78（`CA_BUNDLE` 键按平台能力限制不支持并给出专用提示，见第一阶段第 2 项）；范围已对齐（`CHECK_INTERVAL` 5-3600、`TIMEOUT` 1-300 双端一致）。
 > - 第 2 项响应分类：**双端已完成**。以 Windows 既有严格读取 `ContainsJsonIntField` 为基准移植到 Linux，两端 `ClassifyLoginResponse` 分类规则逐字节一致。
 > - 第 3 项 IPv4/IPv6 与 `LOGIN_IP`：**Linux 端完成**（目的地址 + UDP 路由探测 + 同接口 IPv6 绑定 + `manual/route/heuristic` 来源日志，统一语义与 Windows 方案见上方第 3 项说明）。**Windows 端未开始**。
-> - 第 4 项 `Config` 结构：**Linux 端完成**（`Config` 值结构替换全局配置）。**Windows 端未开始**（`USER_ACCOUNT`/`USER_PASSWORD`/`SERVER_IP`/`LOGIN_IP`/`CHECK_INTERVAL_MS`/`TIMEOUT_MS` 仍为全局变量）。
+> - 第 4 项 `Config` 结构：**双端已完成**。Linux：`Config` 值结构替换全局配置。Windows：`Config` 值结构（与 Linux 字段对齐，另加 Windows 端扩展 `debugResponse`）替换全部配置全局变量（原 `USER_ACCOUNT`/`USER_PASSWORD`/`SERVER_IP`/`LOGIN_IP`/`CHECK_INTERVAL_MS`/`TIMEOUT_MS`/`DEBUG_RESPONSE`），`LoadConfig` 起按 `const Config &` 向下传递。
 > - 第 5 项离线响应分类检查：**Linux 端完成**（`--self-test` 19 例离线自检：14 分类 + 5 地址断言，失败退出 1，不读配置不触网）。**Windows 端未开始**（无 `--self-test`）。
 >
 > 关联遗留：Windows 端响应正文门控已完成（第一阶段第 5 项，`DEBUG_RESPONSE`）。
 >
-> **汇总：Linux 端 5 项全部完成并通过实机验证（v2.0.0）。Windows 端仅第 2 项完成（作为基准端）；第 1 项剩余范围/键对齐，第 3、4、5 项待做。**
+> **汇总：Linux 端 5 项全部完成并通过实机验证（v2.0.0）。Windows 端第 1、2、4 项已完成（第 1 项含 `CHECK_INTERVAL` 5-3600 / `TIMEOUT` 1-300 范围对齐，第 4 项 `Config` 值结构替换全局变量）；第 3 项（IPv4/IPv6 路由探测与 `LOGIN_IP` 语义）、第 5 项（`--self-test` 离线自检）待做。**
 
 ### 第三阶段：修平台生命周期
 
