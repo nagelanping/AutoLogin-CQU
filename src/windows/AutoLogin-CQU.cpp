@@ -31,6 +31,17 @@
 #define WINHTTP_DISABLE_KEEP_ALIVE 0x00000008
 #endif
 
+// 部分 MinGW 版本的 winhttp.h 缺少以下定义
+#ifndef WINHTTP_OPTION_RESOLUTION_CACHE
+#define WINHTTP_OPTION_RESOLUTION_CACHE 48
+typedef struct _WINHTTP_RESOLVED_CACHE_ENTRY
+{
+    DWORD dwTimeout;
+    DWORD AddressListSize;
+    IN_ADDR AddressList[1];
+} WINHTTP_RESOLVED_CACHE_ENTRY, *LPWINHTTP_RESOLVED_CACHE_ENTRY;
+#endif
+
 // 编译指令: g++ <AutoLogin-CQU.cpp> -o <AutoLogin-CQU.exe> -lwinhttp -liphlpapi -lws2_32 -lshell32 -luser32 -static
 
 using namespace std;
@@ -711,50 +722,43 @@ bool GetLocalIPs(string &ipv4, string &ipv6)
 
 // ================= 核心逻辑 =================
 
-// 解析主机名到 IP（优先 IPv4，回退 IPv6）
-bool ResolveHostToIP(const string &host, string &out_ip)
+// 门户连接目标：逻辑主机名恒为域名，SERVER_IP 只固定实际连接地址
+struct PortalTarget
 {
-    out_ip.clear();
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
+    string connectTarget; // 传给 WinHttpConnect 的服务器名（域名，或回退模式下的 IP）
+    bool pinResolution;   // 为 true 时用 SERVER_IP 钉住域名解析（IPv4），保留域名 SNI/主机名校验
+    bool manualHost;      // 为 true 时连接目标是 IP，需手动添加 Host 头
+};
 
-    struct addrinfo *result = NULL;
-    int res = getaddrinfo(host.c_str(), NULL, &hints, &result);
-    if (res != 0 || result == NULL)
-        return false;
-
-    // 优先 IPv4
-    for (struct addrinfo *p = result; p != NULL; p = p->ai_next)
+bool GetPortalTarget(PortalTarget &out)
+{
+    if (SERVER_IP.empty())
     {
-        if (p->ai_family == AF_INET)
-        {
-            char ip[INET_ADDRSTRLEN] = {0};
-            struct sockaddr_in *sa = (struct sockaddr_in *)p->ai_addr;
-            inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
-            out_ip = ip;
-            freeaddrinfo(result);
-            return true;
-        }
+        out.connectTarget = LOGIN_HOST_UTF8;
+        out.pinResolution = false;
+        out.manualHost = false;
+        return true;
     }
 
-    // 再尝试 IPv6
-    for (struct addrinfo *p = result; p != NULL; p = p->ai_next)
+    IN_ADDR addr = {0};
+    if (InetPtonA(AF_INET, SERVER_IP.c_str(), &addr) == 1)
     {
-        if (p->ai_family == AF_INET6)
-        {
-            char ip[INET6_ADDRSTRLEN] = {0};
-            struct sockaddr_in6 *sa6 = (struct sockaddr_in6 *)p->ai_addr;
-            inet_ntop(AF_INET6, &sa6->sin6_addr, ip, sizeof(ip));
-            out_ip = ip;
-            freeaddrinfo(result);
-            return true;
-        }
+        out.connectTarget = LOGIN_HOST_UTF8;
+        out.pinResolution = true;
+        out.manualHost = false;
+        cout << "[信息] 使用配置钉住的服务器 IP: " << SERVER_IP
+             << "（逻辑主机名仍为 " << LOGIN_HOST_UTF8 << "）" << endl;
+        return true;
     }
 
-    freeaddrinfo(result);
-    return false;
+    // IPv6 SERVER_IP：WinHTTP 解析缓存只支持 IPv4，回退为 IP 直连 + 手动 Host 头；
+    // 此时 SNI 不是域名，若门户要求 SNI 或证书不含该 IP，登录可能失败。
+    out.connectTarget = SERVER_IP;
+    out.pinResolution = false;
+    out.manualHost = true;
+    cout << "[警告] SERVER_IP 为 IPv6（" << SERVER_IP
+         << "）：无法钉解析，回退为 IP 直连并手动添加 Host 头；SNI 不是域名，可能登录失败。" << endl;
+    return true;
 }
 
 wstring BuildLoginPath(const string &loginIpv4, const string &ipv6)
@@ -772,25 +776,6 @@ wstring BuildLoginPath(const string &loginIpv4, const string &ipv6)
        << "&term_type=1&jsVersion=4.2.2&terminal_type=1&lang=zh-cn,zh&v=6231";
 
     return LOGIN_PATH_BASE + L"?" + ToWString(ss.str());
-}
-
-bool GetPortalAddress(string &resolvedIP)
-{
-    if (!SERVER_IP.empty())
-    {
-        resolvedIP = SERVER_IP;
-        return true;
-    }
-
-    if (!ResolveHostToIP(LOGIN_HOST_UTF8, resolvedIP))
-    {
-        cerr << "[错误] 无法解析主机名到 IP: " << LOGIN_HOST_UTF8 << endl;
-        cerr << "[提示] 请在 config.yaml 中添加 SERVER_IP: xxx.xxx.xxx.xxx 手动指定服务器 IP" << endl;
-        cerr << "[提示] 可通过 nslookup login.cqu.edu.cn 查询正确的 IP 地址" << endl;
-        return false;
-    }
-
-    return true;
 }
 
 bool ReadResponseBody(HINTERNET hRequest, string &response)
@@ -921,16 +906,14 @@ void PerformLogin(HINTERNET hSession)
     if (!LOGIN_IP.empty())
         cout << "[信息] 使用配置的登录 IP: " << loginIpv4 << endl;
 
-    string resolvedIP;
-    if (!GetPortalAddress(resolvedIP))
+    PortalTarget target;
+    if (!GetPortalTarget(target))
         return;
-    if (!SERVER_IP.empty())
-        cout << "[信息] 使用配置的服务器 IP: " << resolvedIP << endl;
 
-    ScopedWinHttp hConnect(WinHttpConnect(hSession, ToWString(resolvedIP).c_str(), LOGIN_PORT, 0));
+    ScopedWinHttp hConnect(WinHttpConnect(hSession, ToWString(target.connectTarget).c_str(), LOGIN_PORT, 0));
     if (!hConnect)
     {
-        cerr << "[错误] WinHttpConnect 失败 (IP: " << resolvedIP << "): " << GetLastError() << endl;
+        cerr << "[错误] WinHttpConnect 失败 (" << target.connectTarget << "): " << GetLastError() << endl;
         return;
     }
 
@@ -946,16 +929,34 @@ void PerformLogin(HINTERNET hSession)
     }
 
     // TLS 严格校验：不设任何证书忽略标志，WinHTTP 默认校验 CA 链、CN 与有效期。
-
     DWORD disabledFeatures = WINHTTP_DISABLE_KEEP_ALIVE;
     if (!WinHttpSetOption(hRequest.get(), WINHTTP_OPTION_DISABLE_FEATURE, &disabledFeatures, sizeof(disabledFeatures)))
         cerr << "[警告] 禁用 WinHTTP keep-alive 失败: " << GetLastError() << endl;
 
-    wstring hostHeader = L"Host: " + LOGIN_HOST;
-    if (!WinHttpAddRequestHeaders(hRequest.get(), hostHeader.c_str(), (ULONG)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE))
+    if (target.pinResolution)
     {
-        cerr << "[错误] 添加 Host 请求头失败: " << GetLastError() << endl;
-        return;
+        WINHTTP_RESOLVED_CACHE_ENTRY pin;
+        ZeroMemory(&pin, sizeof(pin));
+        pin.dwTimeout = 60000;
+        pin.AddressListSize = 1;
+        InetPtonA(AF_INET, SERVER_IP.c_str(), &pin.AddressList[0]);
+        if (!WinHttpSetOption(hRequest.get(), WINHTTP_OPTION_RESOLUTION_CACHE, &pin, sizeof(pin)))
+        {
+            cerr << "[错误] 钉住服务器 IP (" << SERVER_IP << ") 失败: " << GetLastError() << endl;
+            return;
+        }
+    }
+
+    // 回退模式连接目标是 IP，需手动补域名 Host 头；
+    // 域名连接场景 WinHTTP 会自动添加 Host 头，无需重复。
+    if (target.manualHost)
+    {
+        wstring hostHeader = L"Host: " + LOGIN_HOST;
+        if (!WinHttpAddRequestHeaders(hRequest.get(), hostHeader.c_str(), (ULONG)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE))
+        {
+            cerr << "[错误] 添加 Host 请求头失败: " << GetLastError() << endl;
+            return;
+        }
     }
     if (!WinHttpAddRequestHeaders(hRequest.get(), L"Connection: close", (ULONG)-1, WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE))
         cerr << "[警告] 添加 Connection 请求头失败: " << GetLastError() << endl;
