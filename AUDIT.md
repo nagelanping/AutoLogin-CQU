@@ -4,7 +4,7 @@
 
 > Python 版本不再维护；请勿查看或改动其归档内容。
 >
-> **现状（按端细分）**：Linux 端（`src/linux/`）已完成——四个阶段的 Linux 侧项全部完成并通过实机验证（v2.0.0，详见 `LOG.md`）。Windows 端（`src/windows/`）逐项状态：第一阶段 5 项全部完成（TLS 严格校验、默认域名目标、`SERVER_IP` 钉解析、自定义信任来源按平台限制定为系统信任库、`DEBUG_RESPONSE` 响应门控）；第二阶段第 1、2、3、4 项已完成（配置校验含 `CHECK_INTERVAL` 5-3600 范围对齐、响应分类、IPv4/IPv6 路由探测与 `LOGIN_IP` 语义、`Config` 值结构替换全局变量），第 5 项（`--self-test` 离线自检）未开始；第三阶段第 1、2 项代码层面已改进（commit cf3a6b0），项级验证未做；第四阶段第 2 项（Windows 离线检查）未做。详见各阶段状态注记。
+> **现状（按端细分）**：Linux 端（`src/linux/`）已完成——四个阶段的 Linux 侧项全部完成并通过实机验证（v2.0.0，详见 `LOG.md`）。Windows 端（`src/windows/`）逐项状态：第一阶段 5 项全部完成（TLS 严格校验、默认域名目标、`SERVER_IP` 钉解析、自定义信任来源按平台限制定为系统信任库、`DEBUG_RESPONSE` 响应门控）；第二阶段 5 项全部完成（配置校验含 `CHECK_INTERVAL` 5-3600 范围对齐、响应分类、IPv4/IPv6 路由探测与 `LOGIN_IP` 语义、`Config` 值结构替换全局变量、`--self-test` 离线自检 19 例）；第三阶段第 1、2 项代码层面已改进（commit cf3a6b0），项级验证未做；第四阶段第 2 项（Windows 离线检查）未做。详见各阶段状态注记。
 
 ## 1. 产品定位：先不要改错目标
 
@@ -313,11 +313,11 @@ Linux 版本以 systemd 为唯一主要运行模型：
 > - 第 2 项响应分类：**双端已完成**。以 Windows 既有严格读取 `ContainsJsonIntField` 为基准移植到 Linux，两端 `ClassifyLoginResponse` 分类规则逐字节一致。
 > - 第 3 项 IPv4/IPv6 与 `LOGIN_IP`：**双端已完成**。Linux：目的地址 + UDP 路由探测 + 同接口 IPv6 绑定 + `manual/route/heuristic` 来源日志（统一语义见上方第 3 项说明）。Windows：按修改方案落地——`PortalTarget` 扩展 `destIp`（`SERVER_IP` 或域名解析首个 IPv4/IPv6）、新增 `ProbeRouteSource`（UDP connect 探测）、`GetSameInterfaceAddress`（`GetAdaptersAddresses` 按接口定位跨族地址）、`GetLoginAddresses` 三级选择（`manual`/`route`/`route-v4-fallback`/`heuristic`，兜底保留 `GetLocalIPs` 接口类型+网段优先级），三条结果行追加来源标签。
 > - 第 4 项 `Config` 结构：**双端已完成**。Linux：`Config` 值结构替换全局配置。Windows：`Config` 值结构（与 Linux 字段对齐，另加 Windows 端扩展 `debugResponse`）替换全部配置全局变量（原 `USER_ACCOUNT`/`USER_PASSWORD`/`SERVER_IP`/`LOGIN_IP`/`CHECK_INTERVAL_MS`/`TIMEOUT_MS`/`DEBUG_RESPONSE`），`LoadConfig` 起按 `const Config &` 向下传递。
-> - 第 5 项离线响应分类检查：**Linux 端完成**（`--self-test` 19 例离线自检：14 分类 + 5 地址断言，失败退出 1，不读配置不触网）。**Windows 端未开始**（无 `--self-test`）。
+> - 第 5 项离线响应分类检查：**双端已完成**。Linux：`--self-test` 19 例离线自检（14 分类 + 5 地址断言，失败退出 1，不读配置不触网，v2.0.0）。Windows：用例与 Linux 逐条一致（14 分类 + 回环 UDP 探测×2 + `SERVER_IP` 目的优先 + 同接口双向查找 2 项），`RunSelfTest` 自带 `WSAStartup/WSACleanup`，`main` 首分支处理 `--self-test`，成功退出 0、失败退出 1。
 >
 > 关联遗留：Windows 端响应正文门控已完成（第一阶段第 5 项，`DEBUG_RESPONSE`）。
 >
-> **汇总：Linux 端 5 项全部完成并通过实机验证（v2.0.0）。Windows 端第 1、2、3、4 项已完成（第 1 项含 `CHECK_INTERVAL` 5-3600 / `TIMEOUT` 1-300 范围对齐，第 3 项含 UDP 路由探测与 `manual/route/heuristic` 来源日志，第 4 项 `Config` 值结构替换全局变量）；第 5 项（`--self-test` 离线自检）待做。**
+> **汇总：Linux 端 5 项全部完成并通过实机验证（v2.0.0）。Windows 端 5 项全部完成（第 1 项含 `CHECK_INTERVAL` 5-3600 / `TIMEOUT` 1-300 范围对齐，第 3 项含 UDP 路由探测与 `manual/route/heuristic` 来源日志，第 4 项 `Config` 值结构替换全局变量，第 5 项 `--self-test` 19 例与 Linux 逐条一致）。**
 
 ### 第三阶段：修平台生命周期
 

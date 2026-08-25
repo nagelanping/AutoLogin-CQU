@@ -1256,9 +1256,101 @@ void PerformLogin(const Config &cfg, HINTERNET hSession)
     LogLoginResult(cfg, ClassifyLoginResponse(response), loginIpv4, addressSource, response);
 }
 
-int main()
+// ================= 自检：离线检查（第二阶段第 5 项，与 Linux 端用例一致） =================
+// 用法: AutoLogin-CQU.exe --self-test （无需配置文件和网络；地址探测断言要求 IPv6 回环可用）
+bool RunSelfTest()
+{
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
+    {
+        cerr << "self-test: WSAStartup 失败 (" << GetLastError() << ")" << endl;
+        return false;
+    }
+
+    struct Case
+    {
+        const char *name;
+        string body;
+        LoginResult expected;
+    };
+    Case cases[] = {
+        {"success", "{\"result\":1,\"message\":\"Welcome to Drcom System\"}", LoginResult::Success},
+        {"success_whitespace", "{\"result\" : 1}", LoginResult::Success},
+        {"success_field_order", "{\"message\":\"Welcome to Drcom System\",\"result\":1}", LoginResult::Success},
+        {"success_quoted_value", "{\"result\":\"1\"}", LoginResult::Success},
+        {"already_online_ret_code", "{\"result\":0,\"ret_code\":2,\"message\":\"already online\"}", LoginResult::AlreadyOnline},
+        {"already_online_drcom", "{\"result\":0,\"ret_code\":1,\"message\":\"Welcome to Drcom System\"}", LoginResult::AlreadyOnline},
+        {"auth_failure", "{\"result\":0,\"ret_code\":1,\"message\":\"user not exist\"}", LoginResult::Failed},
+        {"result_prefix_must_not_match", "{\"result\":12}", LoginResult::Failed},
+        {"ret_code_prefix_must_not_match", "{\"ret_code\":21}", LoginResult::Failed},
+        {"empty_response", "", LoginResult::Failed},
+        {"html_error_page", "<html><head><title>502 Bad Gateway</title></head><body>gateway error</body></html>", LoginResult::Failed},
+        {"proxy_error_page", "Bad Gateway\r\nServer: proxy\r\n", LoginResult::Failed},
+        {"truncated_early_field", string("{\"result\":1,") + string(6000, 'x'), LoginResult::Success},
+        {"truncated_no_field", string(6000, 'x'), LoginResult::Failed},
+    };
+
+    int failedCount = 0;
+    for (const Case &c : cases)
+    {
+        LoginResult got = ClassifyLoginResponse(c.body);
+        if (got != c.expected)
+        {
+            ++failedCount;
+            cerr << "self-test: FAIL " << c.name << " expected=" << static_cast<int>(c.expected)
+                 << " got=" << static_cast<int>(got) << endl;
+        }
+    }
+
+    // 地址选择：回环 UDP 探测应返回回环地址（不实际发送报文）
+    string src;
+    if (!(ProbeRouteSource("127.0.0.1", src) && src == "127.0.0.1"))
+    {
+        ++failedCount;
+        cerr << "self-test: FAIL probe_ipv4_loopback got=" << src << endl;
+    }
+    src.clear();
+    if (!(ProbeRouteSource("::1", src) && src == "::1"))
+    {
+        ++failedCount;
+        cerr << "self-test: FAIL probe_ipv6_loopback got=" << src << endl;
+    }
+    // 门户目的 IP：SERVER_IP 优先于域名解析（字面直接采用，不触网）
+    Config probeCfg;
+    probeCfg.serverIp = "192.0.2.1";
+    PortalTarget probeTarget;
+    if (!(GetPortalTarget(probeCfg, probeTarget) && probeTarget.destIp == "192.0.2.1"))
+    {
+        ++failedCount;
+        cerr << "self-test: FAIL resolve_server_ip got=" << probeTarget.destIp << endl;
+    }
+    // 同接口地址查找：回环接口上 127.0.0.1 <-> ::1 双向可查
+    string other;
+    if (!(GetSameInterfaceAddress("127.0.0.1", AF_INET6, other) && other == "::1"))
+    {
+        ++failedCount;
+        cerr << "self-test: FAIL same_iface_v6 got=" << other << endl;
+    }
+    other.clear();
+    if (!(GetSameInterfaceAddress("::1", AF_INET, other) && other == "127.0.0.1"))
+    {
+        ++failedCount;
+        cerr << "self-test: FAIL same_iface_v4 got=" << other << endl;
+    }
+
+    WSACleanup();
+    if (failedCount == 0)
+        cout << "self-test: response classification and address selection checks passed" << endl;
+    return failedCount == 0;
+}
+
+int main(int argc, char *argv[])
 {
     SetConsoleOutputCP(CP_UTF8);
+
+    // 离线自检（第二阶段第 5 项）：不需要配置文件和网络
+    if (argc > 1 && strcmp(argv[1], "--self-test") == 0)
+        return RunSelfTest() ? 0 : 1;
 
     Config config;
     if (!LoadConfig(config))

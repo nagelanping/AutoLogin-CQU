@@ -1,5 +1,13 @@
 # AutoLogin-CQU 修改日志
 
+## 2026-08-25: Windows 第二阶段第 5 项完成——`--self-test` 离线自检
+
+**范围**：`src/windows/AutoLogin-CQU.cpp`。`RunSelfTest()` 用例与 Linux 端逐条一致（19 例）：14 例响应分类（`ContainsJsonIntField` 严格读取：成功/已在线/失败/前缀不匹配/空响应/HTML 与代理错误页/截断场景）+ 5 项地址断言（`127.0.0.1` 与 `::1` 回环 UDP 探测、`SERVER_IP` 目的优先、同接口 `127.0.0.1`<->`::1` 双向查找）。`main` 签名改收 `argc/argv`，首分支处理 `--self-test`（不读配置、不触网、`RunSelfTest` 自带 `WSAStartup/WSACleanup`）：成功退出 0，任一失败退出 1 并打印 FAIL 行。
+
+**验证**：编译 0 错误；在无配置文件目录运行 `--self-test` 全部通过退出 0（证明不依赖配置）；无参运行仍走配置校验以 78 退出。
+
+**状态**：Windows 端第二阶段 5 项全部完成。剩余工作：第三阶段项级验证（第 1、2 项已代码改进，cf3a6b0）、第四阶段第 2 项（Windows 离线检查，`--self-test` 已覆盖其核心，剩文档化）。
+
 ## 2026-08-25: Windows 第二阶段第 3 项完成——IPv4/IPv6 路由探测与 `LOGIN_IP` 语义
 
 **范围**：`src/windows/AutoLogin-CQU.cpp`。按 AUDIT 第 3 项修改方案落地，逻辑与 Linux 逐条对应：
