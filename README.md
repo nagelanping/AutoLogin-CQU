@@ -6,13 +6,13 @@
 
 ## **项目背景与设计理念**
 
-项目目标是提供在 Windows 与 Linux 上运行的校园网认证工具，支持 IPv6、通过 `SERVER_IP` 绕过 DNS 解析、以及不经过系统代理直连门户。配置文件与可执行文件分离。
+项目目标是提供在 Windows 与 Linux 上运行的完善的校园网认证工具，支持 IPv6、通过 `SERVER_IP` 绕过 DNS 解析、不经过系统代理直连门户等功能。配置文件与可执行文件分离。
 
 **核心特性：**
 
 - **配置分离**：账号信息和常规设置与核心代码严格分离，配置文件独立于可运行文件
 - **多平台支持**：提供 Windows (.exe) 和 Linux 二进制可执行文件
-- **C++ 实现**：Windows 版基于 WinHTTP 系统 API，Linux 版依赖 libcurl，使用系统原生 API 实现远低于 python 版本的资源开销
+- **C++ 实现**：Windows 版基于 WinHTTP 系统 API，Linux 版依赖 libcurl，使用系统原生 API 实现极低的资源开销
 - **运行模式**：Windows 版可把控制台隐藏到托盘（后台）或还原（前台）（仅原版 cmd/powershell，安装 WindowsTerminal 后不生效）；Linux 版面向 systemd 后台服务设计，输出进入 systemd journal
 
 ---
@@ -31,16 +31,17 @@
 4. 双击运行 `AutoLogin-CQU.exe`；如需登录后无窗口后台自动运行，按 `windows-headless-setup.md` 配置任务计划程序
 
 **Linux 用户:**
-5. 下载 `AutoLogin-CQU_Linux_CPP.tar.gz`
-6. 解压并赋予执行权限，**确保 `config.yaml` 与 `AutoLogin-CQU` 在同一目录**
-7. 编辑 ``config.yaml`` ，按照注释的提示**补全上网账号信息**
-8. 确认系统已安装 libcurl 运行库（Arch Linux 由 `curl` 包提供）
-9. 进入解压目录后运行 `./AutoLogin-CQU`（不推荐长期手动运行，建议配置 systemd 启动项，请参考 `linux_systemd-setup.md`）
 
-离线自检：Linux 运行 `./AutoLogin-CQU --self-test`，Windows 运行 `AutoLogin-CQU.exe --self-test`。自检不读取配置文件、不访问网络，校验响应分类与本机地址选择逻辑（双端 19 例一致），全部通过时退出码为 `0`。可用于部署前确认二进制在目标系统可正常运行。
+1. 下载 `AutoLogin-CQU_Linux_CPP.tar.gz`
+2. 解压并赋予执行权限，**确保 `config.yaml` 与 `AutoLogin-CQU` 在同一目录**
+3. 编辑 ``config.yaml`` ，按照注释的提示**补全上网账号信息**
+4. 确认系统已安装 libcurl 运行库（由 `curl` 包提供）
+5. 进入解压目录后运行 `./AutoLogin-CQU`（不推荐长期手动运行，建议配置 systemd 启动项，请参考 `linux_systemd-setup.md`）
+
+离线自检：Linux 运行 `./AutoLogin-CQU --self-test`，Windows 运行 `AutoLogin-CQU.exe --self-test`。自检不读取配置文件、不访问网络，校验响应分类与本机地址选择逻辑，全部通过时退出码为 `0`。可用于部署前确认二进制在目标系统可正常运行。
 
 ---
 
 ## **许可证**
 
-本项目基于 [MIT License](LICENSE) 开源。
+本项目基于 [MIT License](LICENSE) 开源。分发需保留版权。
