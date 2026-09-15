@@ -169,7 +169,7 @@ sudo -u abc test -x /home/abc/AutoLogin-CQU_Linux_CPP/AutoLogin-CQU
 
 不建议在加密 home、网络挂载 home 或必须登录后才可访问的目录中配置开机自启服务。
 
-- 如果使用 User 级 systemctl, 删除 .service 文件中 `User=<USERNAME>` 这一行
+- 如果使用 User 级 systemctl, 删除 .service 文件中 `User=<USERNAME>` 这一行, 并将 `WantedBy=multi-user.target` 改为 `WantedBy=default.target` (user manager 的启动链不经过 multi-user.target, 原配置永远不会自启). 注意 User 级服务需登录后才运行, 如需开机即运行, 执行 `sudo loginctl enable-linger <USERNAME>`
 
 ## root 运行
 
