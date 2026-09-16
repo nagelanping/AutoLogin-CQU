@@ -7,7 +7,7 @@
 - 已获取 Linux 版 `AutoLogin-CQU` 可执行文件。
 - 已编辑 `config.yaml`，并确认 `STUDENT_ID`、`USER_PASSWORD` 正确。
 - 系统已安装 libcurl 运行库。源码编译还需要 C++ 编译器和 libcurl 开发头文件。
-- 拥有 sudo 权限。
+- system 级部署需要 sudo 权限；User 级部署不需要，见下文「User 级服务」。
 
 Arch Linux 上 libcurl 由 `curl` 包提供；如缺失，请按发行版标准手动安装系统包。
 
@@ -169,7 +169,27 @@ sudo -u abc test -x /home/abc/AutoLogin-CQU_Linux_CPP/AutoLogin-CQU
 
 不建议在加密 home、网络挂载 home 或必须登录后才可访问的目录中配置开机自启服务。
 
-- 如果使用 User 级 systemctl, 删除 .service 文件中 `User=<USERNAME>` 这一行, 并将 `WantedBy=multi-user.target` 改为 `WantedBy=default.target` (user manager 的启动链不经过 multi-user.target, 原配置永远不会自启). 注意 User 级服务需登录后才运行, 如需开机即运行, 执行 `sudo loginctl enable-linger <USERNAME>`
+## User 级服务（无需 sudo）
+
+适用于程序放在自己 home 目录、不建专用系统用户的场景。
+
+单元放在 `~/.config/systemd/user/autologin-cqu.service`。相对仓库模板改动两处：删除 `User=<USERNAME>` 行，并把 `WantedBy=multi-user.target` 改为 `WantedBy=default.target`（user manager 的启动链不经过 `multi-user.target`，不改则永远不会自启）。
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp autologin-cqu.service ~/.config/systemd/user/autologin-cqu.service
+systemctl --user daemon-reload
+systemctl --user enable --now autologin-cqu
+systemctl --user status autologin-cqu --no-pager
+journalctl --user -u autologin-cqu -n 100 --no-pager
+```
+
+`WorkingDirectory` 仍需指向 `config.yaml` 与可执行文件所在目录。
+
+与 system 级的两点差异：
+
+- `After=`/`Wants=network-online.target` 在 user manager 中没有对应 unit（`not-found`），依赖被静默忽略。user 实例也无法排序到系统网络就绪之后，因此服务启动后首轮检查可能失败一次（日志 `error: failed to get local IPv4 address`），下一轮即自愈。上文「网络启动顺序」一节的 wait-online 做法对 user 级不适用。
+- 未启用 linger 时服务随会话存在：注销或退出图形会话即停止。需要开机（未登录）即运行并在注销后保持，执行 `sudo loginctl enable-linger <USERNAME>`。
 
 ## root 运行
 
@@ -206,6 +226,8 @@ sudo systemctl enable --now systemd-networkd-wait-online.service
 ```
 
 即使启动早于校园网门户可用，程序也会按 `CHECK_INTERVAL` 周期重试。启动初期偶发 `warning: DNS resolution of login.cqu.edu.cn failed; falling back to heuristic address`，或 libcurl 的域名解析失败消息（如 `Could not resolve host`），不一定代表 service 配置错误。设置 `SERVER_IP` 后程序绕过 DNS 解析，不会出现上述消息。
+
+本节均针对 system 级部署。User 级服务无法排序到系统网络就绪，做法见下文「User 级服务」。
 
 ## 配置项说明
 
